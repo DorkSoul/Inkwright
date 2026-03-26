@@ -489,7 +489,47 @@ details[open] .regen-summary::before { content: '− '; }
 .tts-control-row label {
   font-size: 0.85rem;
   color: var(--text-muted);
-  min-width: 42px;
+  min-width: 56px;
+}
+
+/* Blend voices */
+.blend-toggle-row label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  min-width: unset;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.blend-section {
+  border-left: 2px solid var(--border);
+  padding-left: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.blend-ratio-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.blend-slider {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--accent);
+}
+.blend-end-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.blend-pct {
+  font-size: 0.78rem;
+  color: var(--accent-h);
+  min-width: 2.5rem;
+  text-align: right;
 }
 
 /* --- Progress bar --------------------------------------- */

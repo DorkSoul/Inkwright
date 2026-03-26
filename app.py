@@ -226,13 +226,17 @@ def book_detail(book_id):
         if os.path.exists(epub_path):
             file_size_mb = round(os.path.getsize(epub_path) / (1024 * 1024), 2)
 
-        from tts_engine import AVAILABLE_VOICES, VOICE_LABELS
+        from tts_engine import (AVAILABLE_VOICES, VOICE_LABELS, VOICES_BY_LANGUAGE,
+                                LANGUAGES, voice_gender_groups)
         return render_template(
             'book_detail.html',
             book=book,
             file_size_mb=file_size_mb,
             available_voices=AVAILABLE_VOICES,
             voice_labels=VOICE_LABELS,
+            voices_by_language=VOICES_BY_LANGUAGE,
+            languages=LANGUAGES,
+            voice_gender_groups=voice_gender_groups,
             favourites=_load_favourites(),
         )
     finally:
@@ -247,10 +251,24 @@ VALID_SPEEDS = {0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3}
 
 @app.route('/book/<int:book_id>/generate', methods=['POST'])
 def generate_book(book_id):
-    from tts_engine import AVAILABLE_VOICES
+    from tts_engine import AVAILABLE_VOICES, LANGUAGES
     voice = request.form.get('voice', 'af_heart')
     if voice not in AVAILABLE_VOICES:
         voice = 'af_heart'
+
+    voice_blend = request.form.get('voice_blend', '').strip() or None
+    if voice_blend and voice_blend not in AVAILABLE_VOICES:
+        voice_blend = None
+
+    try:
+        blend_ratio = float(request.form.get('blend_ratio', '0.5'))
+        blend_ratio = max(0.0, min(1.0, blend_ratio))
+    except ValueError:
+        blend_ratio = 0.5
+
+    language = request.form.get('language', 'a')
+    if language not in LANGUAGES:
+        language = 'a'
 
     try:
         speed = float(request.form.get('speed', '1.0'))
@@ -262,12 +280,15 @@ def generate_book(book_id):
     session = get_session()
     try:
         book = _get_book_or_404(book_id, session)
-        book.tts_status = TTSStatus.queued
-        book.tts_voice = voice
-        book.tts_speed = speed
+        book.tts_status     = TTSStatus.queued
+        book.tts_voice      = voice
+        book.tts_voice_blend= voice_blend
+        book.tts_blend_ratio= blend_ratio
+        book.tts_language   = language
+        book.tts_speed      = speed
         book.tts_progress_pct = 0.0
-        book.tts_error = None
-        book.updated_at = datetime.utcnow()
+        book.tts_error      = None
+        book.updated_at     = datetime.utcnow()
         session.commit()
     finally:
         session.close()
@@ -459,38 +480,23 @@ def toggle_favourite():
 # Preview generation
 # ---------------------------------------------------------------------------
 
-def _run_preview(book_id: int, epub_path: str, voice: str, speed: float, output_path: str):
+def _run_preview(book_id: int, epub_path: str, voice: str, speed: float,
+                 output_path: str, voice_blend: str = None, blend_ratio: float = 0.5,
+                 lang_code: str = None):
     """Background thread: synthesise a short sample and write it to output_path."""
     try:
-        from tts_engine import TTSEngine, SAMPLE_RATE
+        from tts_engine import TTSEngine
         from audio_utils import audio_to_mp3
 
-        parsed = parse_epub(epub_path)
-        paragraphs = parsed.paragraphs
-        if not paragraphs:
+        texts = _sample_paragraphs(epub_path)
+        if not texts:
             raise ValueError("No paragraphs found in EPUB")
 
-        # Pick a random start point between 10% and 85% through the book
-        # to avoid front matter and end matter
-        lo = max(0, len(paragraphs) // 10)
-        hi = max(lo + 1, int(len(paragraphs) * 0.85))
-        start = random.randint(lo, hi - 1)
-
-        # Accumulate paragraphs until we reach the target character count
-        selected = []
-        total_chars = 0
-        for para in paragraphs[start:]:
-            selected.append(para.text)
-            total_chars += len(para.text)
-            if total_chars >= PREVIEW_TARGET_CHARS:
-                break
-
-        if not selected:
-            selected = [paragraphs[0].text]
-
-        engine = TTSEngine(voice=voice, speed=speed)
+        engine = TTSEngine(voice=voice, speed=speed,
+                           voice_blend=voice_blend, blend_ratio=blend_ratio,
+                           lang_code=lang_code)
         engine.load()
-        chunks = [engine.synthesise(t) for t in selected]
+        chunks = [engine.synthesise(t) for t in texts]
         engine.close()
 
         audio_to_mp3(chunks, output_path)
@@ -510,10 +516,24 @@ def _run_preview(book_id: int, epub_path: str, voice: str, speed: float, output_
 
 @app.route('/book/<int:book_id>/preview', methods=['POST'])
 def start_preview(book_id):
-    from tts_engine import AVAILABLE_VOICES
+    from tts_engine import AVAILABLE_VOICES, LANGUAGES
     voice = request.form.get('voice', 'af_heart')
     if voice not in AVAILABLE_VOICES:
         voice = 'af_heart'
+
+    voice_blend = request.form.get('voice_blend', '').strip() or None
+    if voice_blend and voice_blend not in AVAILABLE_VOICES:
+        voice_blend = None
+    try:
+        blend_ratio = float(request.form.get('blend_ratio', '0.5'))
+        blend_ratio = max(0.0, min(1.0, blend_ratio))
+    except ValueError:
+        blend_ratio = 0.5
+
+    language = request.form.get('language', 'a')
+    if language not in LANGUAGES:
+        language = 'a'
+
     try:
         speed = float(request.form.get('speed', '1.0'))
         if speed not in VALID_SPEEDS:
@@ -537,6 +557,7 @@ def start_preview(book_id):
     threading.Thread(
         target=_run_preview,
         args=(book_id, epub_path, voice, speed, output_path),
+        kwargs={'voice_blend': voice_blend, 'blend_ratio': blend_ratio, 'lang_code': language},
         daemon=True,
     ).start()
 

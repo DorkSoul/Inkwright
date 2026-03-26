@@ -29,6 +29,9 @@ class Book(Base):
     cover_image_path = Column(String, nullable=True)
     tts_status = Column(SAEnum(TTSStatus), nullable=False, default=TTSStatus.none)
     tts_voice = Column(String, nullable=True, default="af_heart")
+    tts_voice_blend = Column(String, nullable=True)
+    tts_blend_ratio = Column(Float, nullable=False, default=0.5)
+    tts_language = Column(String, nullable=False, default="a")
     tts_speed = Column(Float, nullable=False, default=1.0)
     tts_progress_pct = Column(Float, nullable=False, default=0.0)
     tts_error = Column(String, nullable=True)
@@ -92,6 +95,9 @@ def _migrate(eng):
     """Apply lightweight column additions for existing databases."""
     migrations = [
         "ALTER TABLE books ADD COLUMN tts_speed FLOAT NOT NULL DEFAULT 1.0",
+        "ALTER TABLE books ADD COLUMN tts_voice_blend VARCHAR",
+        "ALTER TABLE books ADD COLUMN tts_blend_ratio FLOAT NOT NULL DEFAULT 0.5",
+        "ALTER TABLE books ADD COLUMN tts_language VARCHAR NOT NULL DEFAULT 'a'",
     ]
     with eng.connect() as conn:
         for stmt in migrations:
