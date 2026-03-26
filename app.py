@@ -209,6 +209,10 @@ def upload_book():
     finally:
         session.close()
 
+    # JSON response for programmatic (mass-import) callers
+    if request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html:
+        return jsonify({'book_id': book_id, 'title': title, 'author': author})
+
     return redirect(url_for('book_detail', book_id=book_id))
 
 

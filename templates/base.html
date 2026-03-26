@@ -15,7 +15,8 @@
     </a>
     <nav class="site-nav">
       <a href="{{ back_url | default(url_for('library')) }}" class="btn-library">&#8592; {{ back_label | default('Library') }}</a>
-      <label class="upload-btn" for="upload-input">+ Upload EPUB</label>
+      <label class="upload-btn" for="upload-input">+ Upload</label>
+      <button class="upload-btn mass-import-btn" onclick="openMassImport()">&#8679; Import Folder</button>
       <form id="upload-form" action="{{ url_for('upload_book') }}" method="post" enctype="multipart/form-data">
         <input
           id="upload-input"
@@ -26,8 +27,141 @@
           onchange="document.getElementById('upload-form').submit()"
         >
       </form>
+      <!-- Hidden folder picker for mass import -->
+      <input
+        id="mass-import-input"
+        type="file"
+        webkitdirectory
+        multiple
+        accept=".epub,.mobi,.azw,.azw3,.fb2,.lit,.pdb,.rtf,.txt,.docx,.html,.htm"
+        style="display:none"
+      >
     </nav>
   </header>
+
+  <!-- Mass Import Modal -->
+  <div id="mass-import-overlay" class="mass-import-overlay" style="display:none" onclick="if(event.target===this&&!massImportRunning)closeMassImport()">
+    <div class="mass-import-modal">
+      <div class="mass-import-header">
+        <h2 class="mass-import-title">Import Folder</h2>
+        <button class="mass-import-close" id="mass-import-close" onclick="closeMassImport()">&#10005;</button>
+      </div>
+      <div id="mass-import-idle" class="mass-import-idle">
+        <p>Select a folder to recursively import all supported ebook files.</p>
+        <p class="mass-import-formats">Supported: .epub .mobi .azw .azw3 .fb2 .lit .pdb .rtf .txt .docx .html .htm</p>
+        <button class="btn-primary" onclick="document.getElementById('mass-import-input').click()">Choose Folder&hellip;</button>
+      </div>
+      <div id="mass-import-progress" class="mass-import-progress" style="display:none">
+        <div class="mass-import-summary" id="mass-import-summary">Preparing&hellip;</div>
+        <ul class="mass-import-list" id="mass-import-list"></ul>
+        <div class="mass-import-footer">
+          <button class="btn-primary" id="mass-import-done-btn" onclick="closeMassImport()" style="display:none">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  var massImportRunning = false;
+  var ACCEPTED_EXTS = new Set(['.epub','.mobi','.azw','.azw3','.fb2','.lit','.pdb','.rtf','.txt','.docx','.html','.htm']);
+
+  function openMassImport() {
+    document.getElementById('mass-import-overlay').style.display = 'flex';
+    document.getElementById('mass-import-idle').style.display = '';
+    document.getElementById('mass-import-progress').style.display = 'none';
+    document.getElementById('mass-import-close').style.display = '';
+    document.getElementById('mass-import-input').value = '';
+  }
+
+  function closeMassImport() {
+    if (massImportRunning) return;
+    document.getElementById('mass-import-overlay').style.display = 'none';
+    // Reload library if we imported anything
+    if (document.getElementById('mass-import-done-btn').style.display !== 'none') {
+      window.location.href = '/';
+    }
+  }
+
+  document.getElementById('mass-import-input').addEventListener('change', function() {
+    var files = Array.from(this.files).filter(function(f) {
+      var ext = f.name.lastIndexOf('.') >= 0 ? f.name.slice(f.name.lastIndexOf('.')).toLowerCase() : '';
+      return ACCEPTED_EXTS.has(ext);
+    });
+    if (!files.length) { alert('No supported ebook files found in the selected folder.'); return; }
+    runMassImport(files);
+  });
+
+  function runMassImport(files) {
+    massImportRunning = true;
+    document.getElementById('mass-import-idle').style.display = 'none';
+    document.getElementById('mass-import-progress').style.display = '';
+    document.getElementById('mass-import-close').style.display = 'none';
+    document.getElementById('mass-import-done-btn').style.display = 'none';
+
+    var list = document.getElementById('mass-import-list');
+    var summary = document.getElementById('mass-import-summary');
+    list.innerHTML = '';
+
+    var total = files.length, done = 0, ok = 0, fail = 0;
+    summary.textContent = 'Importing 0 / ' + total + '\u2026';
+
+    // Create list items up front
+    var items = files.map(function(f) {
+      var li = document.createElement('li');
+      li.className = 'mi-item mi-pending';
+      li.innerHTML = '<span class="mi-status">&#9679;</span><span class="mi-name"></span><span class="mi-msg"></span>';
+      li.querySelector('.mi-name').textContent = f.webkitRelativePath || f.name;
+      list.appendChild(li);
+      return li;
+    });
+
+    function uploadOne(i) {
+      if (i >= files.length) {
+        massImportRunning = false;
+        summary.textContent = 'Done: ' + ok + ' imported, ' + fail + ' failed.';
+        document.getElementById('mass-import-done-btn').style.display = '';
+        document.getElementById('mass-import-close').style.display = '';
+        return;
+      }
+      var f = files[i];
+      var li = items[i];
+      li.className = 'mi-item mi-running';
+      li.querySelector('.mi-status').textContent = '\u23F3';
+
+      var fd = new FormData();
+      fd.append('epub', f, f.name);
+      fetch('{{ url_for("upload_book") }}', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: fd,
+      })
+      .then(function(r) {
+        if (!r.ok) return r.text().then(function(t){ throw new Error(t || r.statusText); });
+        return r.json();
+      })
+      .then(function(data) {
+        ok++;
+        li.className = 'mi-item mi-ok';
+        li.querySelector('.mi-status').textContent = '\u2713';
+        li.querySelector('.mi-msg').textContent = data.title || '';
+      })
+      .catch(function(e) {
+        fail++;
+        li.className = 'mi-item mi-fail';
+        li.querySelector('.mi-status').textContent = '\u2717';
+        li.querySelector('.mi-msg').textContent = e.message || 'Error';
+      })
+      .finally(function() {
+        done++;
+        summary.textContent = 'Importing ' + done + ' / ' + total + '\u2026';
+        li.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        uploadOne(i + 1);
+      });
+    }
+
+    uploadOne(0);
+  }
+  </script>
 
   <main class="site-main">
     {% block content %}{% endblock %}
