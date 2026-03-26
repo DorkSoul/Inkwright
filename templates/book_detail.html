@@ -117,7 +117,10 @@
 
       {# ---- Done ---- #}
       {% elif book.tts_status.value == 'done' %}
-      <a href="{{ url_for('play_book', book_id=book.id) }}" class="btn btn-primary">Play Audiobook</a>
+      <div class="done-actions">
+        <a href="{{ url_for('play_book', book_id=book.id) }}" class="btn btn-primary">Play Audiobook</a>
+        <button class="btn btn-danger" onclick="deleteAudio({{ book.id }})">Delete Audio</button>
+      </div>
 
       <details class="regen-details">
         <summary class="regen-summary">Regenerate with different settings</summary>
@@ -243,6 +246,12 @@ function deleteBook(id) {
   if (!confirm('Delete this book and all associated audio? This cannot be undone.')) return;
   fetch('/book/' + id, { method: 'DELETE' })
     .then(function() { window.location.href = '/'; });
+}
+
+function deleteAudio(id) {
+  if (!confirm('Delete the generated audio? The book will remain and can be regenerated.')) return;
+  fetch('/book/' + id + '/audio', { method: 'DELETE' })
+    .then(function() { window.location.reload(); });
 }
 
 // ---------------------------------------------------------------------------

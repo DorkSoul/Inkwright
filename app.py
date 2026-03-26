@@ -388,6 +388,36 @@ def delete_book(book_id):
     return jsonify({'deleted': True})
 
 
+@app.route('/book/<int:book_id>/audio', methods=['DELETE'])
+def delete_audio(book_id):
+    """Delete only the generated audio/index, resetting the book to ungenerated."""
+    session = get_session()
+    try:
+        book = _get_book_or_404(book_id, session)
+
+        mp3_path = os.path.join(AUDIOBOOKS_DIR, f"{book_id}.mp3")
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+
+        json_path = os.path.join(AUDIOBOOKS_DIR, f"{book_id}.json")
+        if os.path.exists(json_path):
+            os.remove(json_path)
+
+        existing = session.query(AudioIndex).filter(AudioIndex.book_id == book_id).first()
+        if existing:
+            session.delete(existing)
+
+        book.tts_status = TTSStatus.none
+        book.tts_progress_pct = 0.0
+        book.tts_error = None
+        book.updated_at = datetime.utcnow()
+        session.commit()
+    finally:
+        session.close()
+
+    return jsonify({'deleted': True})
+
+
 # ---------------------------------------------------------------------------
 # Favourite voices
 # ---------------------------------------------------------------------------

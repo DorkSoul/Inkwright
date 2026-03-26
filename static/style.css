@@ -447,6 +447,12 @@ details[open] .regen-summary::before { content: '− '; }
   color: var(--text-muted);
 }
 
+.done-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
 .detail-danger  { margin-top: 2rem; }
 
 .generate-form {
