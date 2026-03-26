@@ -144,6 +144,21 @@ class TTSEngine:
             logger.error("Failed to load Kokoro pipeline: %s", e)
             raise
 
+    def synthesise_chunks(self, text: str) -> list[tuple[str, np.ndarray]]:
+        """
+        Like synthesise() but returns one (chunk_text, audio) pair per TTS chunk
+        so the caller can record per-chunk timing and character offsets.
+        """
+        if self._pipeline is None:
+            self.load()
+        result = []
+        for chunk in _chunk_text(text):
+            audio = self._synthesise_chunk(chunk)
+            if audio is None or len(audio) == 0:
+                audio = np.zeros(SAMPLE_RATE // 10, dtype=np.float32)
+            result.append((chunk, audio))
+        return result if result else [('', np.zeros(SAMPLE_RATE // 10, dtype=np.float32))]
+
     def synthesise(self, text: str) -> np.ndarray:
         """
         Synthesise text → float32 numpy array at SAMPLE_RATE Hz.

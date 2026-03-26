@@ -20,12 +20,13 @@ AUDIOBOOKS_DIR = '/audiobooks'
 COVERS_DIR = '/config/covers'
 
 
-def _build_index(book_id: int, title: str, author: str, paragraph_entries: list) -> dict:
-    """Build the JSON index dict from accumulated paragraph timing data."""
+def _build_index(book_id: int, title: str, author: str,
+                  source_para_entries: list, chunk_entries: list) -> dict:
+    """Build the JSON index dict from accumulated paragraph and chunk timing data."""
     chapters = []
     seen_chapters = set()
 
-    for entry in paragraph_entries:
+    for entry in chunk_entries:
         ci = entry['chapter_index']
         if ci not in seen_chapters:
             chapters.append({
@@ -35,7 +36,7 @@ def _build_index(book_id: int, title: str, author: str, paragraph_entries: list)
             })
             seen_chapters.add(ci)
 
-    duration = paragraph_entries[-1]['end_time'] if paragraph_entries else 0.0
+    duration = chunk_entries[-1]['end_time'] if chunk_entries else 0.0
 
     return {
         'book_id': book_id,
@@ -43,15 +44,25 @@ def _build_index(book_id: int, title: str, author: str, paragraph_entries: list)
         'author': author,
         'duration_seconds': duration,
         'chapters': chapters,
-        'paragraphs': [
+        'source_paragraphs': [
             {
-                'chapter_index': e['chapter_index'],
                 'paragraph_index': e['paragraph_index'],
-                'start_time': e['start_time'],
-                'end_time': e['end_time'],
+                'chapter_index': e['chapter_index'],
+                'chapter_title': e['chapter_title'],
                 'text': e['text'],
             }
-            for e in paragraph_entries
+            for e in source_para_entries
+        ],
+        'chunks': [
+            {
+                'paragraph_index': e['paragraph_index'],
+                'chapter_index': e['chapter_index'],
+                'char_start': e['char_start'],
+                'char_end': e['char_end'],
+                'start_time': e['start_time'],
+                'end_time': e['end_time'],
+            }
+            for e in chunk_entries
         ],
     }
 
@@ -98,24 +109,43 @@ def _process_book(book_id: int):
         engine.load()
 
         audio_chunks = []
-        paragraph_entries = []
+        source_para_entries = []
+        chunk_entries = []
         current_time = 0.0
 
         for i, para in enumerate(paragraphs):
-            audio = engine.synthesise(para.text)
-            duration = len(audio) / SAMPLE_RATE
-
-            paragraph_entries.append({
+            source_para_entries.append({
+                'paragraph_index': para.paragraph_index,
                 'chapter_index': para.chapter_index,
                 'chapter_title': para.chapter_title,
-                'paragraph_index': para.paragraph_index,
-                'start_time': current_time,
-                'end_time': current_time + duration,
                 'text': para.text,
             })
 
-            audio_chunks.append(audio)
-            current_time += duration
+            # Synthesise chunk-by-chunk so we can record per-chunk timing
+            # and character offsets within the source paragraph.
+            tts_chunks = engine.synthesise_chunks(para.text)
+            src_pos = 0
+            for chunk_text, chunk_audio in tts_chunks:
+                duration = len(chunk_audio) / SAMPLE_RATE
+
+                # Locate this chunk in the source paragraph text
+                idx = para.text.find(chunk_text, src_pos)
+                char_start = idx if idx != -1 else src_pos
+                char_end = char_start + len(chunk_text)
+                src_pos = char_end
+
+                chunk_entries.append({
+                    'paragraph_index': para.paragraph_index,
+                    'chapter_index': para.chapter_index,
+                    'chapter_title': para.chapter_title,
+                    'char_start': char_start,
+                    'char_end': char_end,
+                    'start_time': current_time,
+                    'end_time': current_time + duration,
+                })
+
+                audio_chunks.append(chunk_audio)
+                current_time += duration
 
             pct = round((i + 1) / total * 100, 1)
             # Update progress every 10 paragraphs or on the last one
@@ -136,7 +166,8 @@ def _process_book(book_id: int):
         # --- JSON index ---
         index_filename = f"{book_id}.json"
         index_path = os.path.join(AUDIOBOOKS_DIR, index_filename)
-        index_data = _build_index(book_id, parsed.title, parsed.author, paragraph_entries)
+        index_data = _build_index(book_id, parsed.title, parsed.author,
+                                   source_para_entries, chunk_entries)
         write_index_atomic(index_data, index_path)
 
         # --- DB update ---
@@ -152,7 +183,7 @@ def _process_book(book_id: int):
             index_json_filename=index_filename,
             duration_seconds=total_duration,
             chapter_count=len(index_data['chapters']),
-            paragraph_count=len(paragraph_entries),
+            paragraph_count=len(source_para_entries),
             generated_at=datetime.utcnow(),
         )
         session.add(audio_index)
@@ -163,8 +194,9 @@ def _process_book(book_id: int):
         session.commit()
 
         logger.info(
-            "Book %d done — %.1f s audio, %d chapters, %d paragraphs",
-            book_id, total_duration, len(index_data['chapters']), len(paragraph_entries)
+            "Book %d done — %.1f s audio, %d chapters, %d paragraphs, %d chunks",
+            book_id, total_duration, len(index_data['chapters']),
+            len(source_para_entries), len(chunk_entries)
         )
 
     except Exception as e:

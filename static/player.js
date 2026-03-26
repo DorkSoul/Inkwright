@@ -3,10 +3,14 @@
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-var index = null;          // full JSON index
-var paragraphs = [];       // flat array from index.paragraphs
-var chapters = [];         // array from index.chapters
+var index = null;
+var chunks = [];          // [{paragraph_index, chapter_index, char_start, char_end, start_time, end_time}]
+var sourceParas = [];     // [{paragraph_index, chapter_index, chapter_title, text}]
+var sourceParaMap = {};   // paragraph_index → sourceParas entry
+var chapters = [];
 var currentChapterIdx = -1;
+var currentChunkIdx = -1;   // index into chunks[]
+var currentParaIdx = -1;    // paragraph_index of the active source paragraph
 var isSeeking = false;
 var highlightTimer = null;
 
@@ -28,18 +32,25 @@ function formatTime(seconds) {
   return m + ':' + (ss < 10 ? '0' : '') + ss;
 }
 
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 /**
- * Binary search paragraphs array for the entry containing `time`.
- * Returns index into `paragraphs`, or -1.
+ * Binary search chunks array for the entry containing `time`.
+ * Returns index into chunks[], or -1.
  */
-function findActiveParagraph(time) {
-  var lo = 0, hi = paragraphs.length - 1, result = -1;
+function findActiveChunk(time) {
+  var lo = 0, hi = chunks.length - 1, result = -1;
   while (lo <= hi) {
     var mid = (lo + hi) >> 1;
-    var p = paragraphs[mid];
-    if (time >= p.start_time && time < p.end_time) {
+    var c = chunks[mid];
+    if (time >= c.start_time && time < c.end_time) {
       return mid;
-    } else if (time < p.start_time) {
+    } else if (time < c.start_time) {
       hi = mid - 1;
     } else {
       result = mid;
@@ -51,16 +62,12 @@ function findActiveParagraph(time) {
 
 /**
  * Binary search chapters array for the chapter active at `time`.
- * Returns the chapter index value (not array index).
  */
 function findActiveChapter(time) {
   var result = 0;
   for (var i = 0; i < chapters.length; i++) {
-    if (chapters[i].start_time <= time) {
-      result = i;
-    } else {
-      break;
-    }
+    if (chapters[i].start_time <= time) result = i;
+    else break;
   }
   return result;
 }
@@ -86,23 +93,33 @@ function renderChapterList() {
 
 function renderParagraphsForChapter(chapterArrayIdx) {
   paragraphArea.innerHTML = '';
+  currentParaIdx = -1;   // force highlight refresh on next tick
+
   var ch = chapters[chapterArrayIdx];
-  var nextChStart = chapterArrayIdx + 1 < chapters.length
-    ? chapters[chapterArrayIdx + 1].start_time
-    : Infinity;
+  if (!ch) return;
 
-  paragraphs.forEach(function (p, i) {
-    if (p.chapter_index !== ch.index) return;
+  var parasForChapter = sourceParas.filter(function (p) {
+    return p.chapter_index === ch.index;
+  });
 
-    var div = document.createElement('div');
-    div.className = 'paragraph';
-    div.textContent = p.text;
-    div.dataset.paraIdx = i;
-    div.addEventListener('click', function () {
-      audio.currentTime = p.start_time;
-      audio.play();
+  parasForChapter.forEach(function (p) {
+    var el = document.createElement('p');
+    el.className = 'source-para';
+    el.dataset.paraIdx = p.paragraph_index;
+    el.textContent = p.text;
+
+    // Clicking a paragraph seeks to its first chunk
+    el.addEventListener('click', function () {
+      var firstChunk = chunks.find(function (c) {
+        return c.paragraph_index === p.paragraph_index;
+      });
+      if (firstChunk) {
+        audio.currentTime = firstChunk.start_time;
+        audio.play();
+      }
     });
-    paragraphArea.appendChild(div);
+
+    paragraphArea.appendChild(el);
   });
 }
 
@@ -119,21 +136,65 @@ function updateChapterHighlight(arrayIdx) {
   }
 }
 
-function updateParagraphHighlight(paraArrayIdx) {
-  var divs = paragraphArea.querySelectorAll('.paragraph');
-  divs.forEach(function (div) {
-    var idx = parseInt(div.dataset.paraIdx, 10);
-    var isActive = idx === paraArrayIdx;
-    div.classList.toggle('active', isActive);
-    if (isActive) {
-      // Scroll into view if not already visible
-      var rect = div.getBoundingClientRect();
+/**
+ * Apply an inline <mark> highlight to the active chunk within its paragraph.
+ * Clears the highlight from the previously active paragraph if it changed.
+ */
+function updateChunkHighlight(chunkIdx) {
+  if (chunkIdx < 0 || chunkIdx >= chunks.length) {
+    // Nothing active — clear any existing highlight
+    if (currentParaIdx !== -1) {
+      clearParaHighlight(currentParaIdx);
+      currentParaIdx = -1;
+    }
+    currentChunkIdx = -1;
+    return;
+  }
+
+  var chunk = chunks[chunkIdx];
+  var paraIdx = chunk.paragraph_index;
+
+  // If paragraph changed, clear old highlight
+  if (paraIdx !== currentParaIdx && currentParaIdx !== -1) {
+    clearParaHighlight(currentParaIdx);
+  }
+
+  // Apply highlight to the new/current paragraph
+  var el = paragraphArea.querySelector('[data-para-idx="' + paraIdx + '"]');
+  if (el) {
+    var para = sourceParaMap[paraIdx];
+    if (para) {
+      var text = para.text;
+      var s = chunk.char_start;
+      var e = chunk.char_end;
+      el.innerHTML =
+        escapeHtml(text.slice(0, s)) +
+        '<mark>' + escapeHtml(text.slice(s, e)) + '</mark>' +
+        escapeHtml(text.slice(e));
+    }
+    el.classList.add('active');
+
+    // Scroll into view if the paragraph just became active
+    if (paraIdx !== currentParaIdx) {
+      var rect = el.getBoundingClientRect();
       var areaRect = paragraphArea.getBoundingClientRect();
       if (rect.top < areaRect.top || rect.bottom > areaRect.bottom) {
-        div.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       }
     }
-  });
+  }
+
+  currentChunkIdx = chunkIdx;
+  currentParaIdx = paraIdx;
+}
+
+function clearParaHighlight(paraIdx) {
+  var el = paragraphArea.querySelector('[data-para-idx="' + paraIdx + '"]');
+  if (el) {
+    var para = sourceParaMap[paraIdx];
+    if (para) el.textContent = para.text;
+    el.classList.remove('active');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +223,11 @@ function onHighlightTick() {
     renderParagraphsForChapter(chArrayIdx);
   }
 
-  // Active paragraph
-  var paraIdx = findActiveParagraph(time);
-  updateParagraphHighlight(paraIdx);
+  // Active chunk → highlight within paragraph
+  var chunkIdx = findActiveChunk(time);
+  if (chunkIdx !== currentChunkIdx) {
+    updateChunkHighlight(chunkIdx);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,23 +241,52 @@ function loadIndex(url) {
     })
     .then(function (data) {
       index = data;
-      paragraphs = data.paragraphs || [];
       chapters = data.chapters || [];
 
-      // Set total time display from index (audio may not be loaded yet)
+      // Support both new format (source_paragraphs + chunks)
+      // and old format (paragraphs with text) for backward compatibility.
+      if (data.source_paragraphs && data.chunks) {
+        sourceParas = data.source_paragraphs;
+        chunks = data.chunks;
+      } else {
+        // Old format: each paragraph entry is also its own chunk
+        sourceParas = (data.paragraphs || []).map(function (p, i) {
+          return {
+            paragraph_index: i,
+            chapter_index: p.chapter_index,
+            chapter_title: '',
+            text: p.text,
+          };
+        });
+        chunks = (data.paragraphs || []).map(function (p, i) {
+          return {
+            paragraph_index: i,
+            chapter_index: p.chapter_index,
+            char_start: 0,
+            char_end: (p.text || '').length,
+            start_time: p.start_time,
+            end_time: p.end_time,
+          };
+        });
+      }
+
+      // Build lookup map
+      sourceParaMap = {};
+      sourceParas.forEach(function (p) {
+        sourceParaMap[p.paragraph_index] = p;
+      });
+
       timeTotal.textContent = formatTime(data.duration_seconds);
       seekBar.max = 1000;
 
       renderChapterList();
 
-      // Show first chapter immediately
       currentChapterIdx = 0;
       if (chapters.length > 0) {
         updateChapterHighlight(0);
         renderParagraphsForChapter(0);
       }
 
-      // Start highlight loop
       highlightTimer = setInterval(onHighlightTick, 500);
     })
     .catch(function (e) {
@@ -207,7 +299,7 @@ function loadIndex(url) {
 // Audio event handlers
 // ---------------------------------------------------------------------------
 function onAudioTimeUpdate() {
-  // Handled by interval; this is a fallback for coarse updates
+  // Handled by interval
 }
 
 function onAudioDurationChange() {
@@ -301,14 +393,12 @@ document.addEventListener('DOMContentLoaded', function () {
   sidebarOverlay  = document.getElementById('sidebar-overlay');
   sidebarClose    = document.getElementById('sidebar-close');
 
-  // Audio events
   audio.addEventListener('timeupdate', onAudioTimeUpdate);
   audio.addEventListener('durationchange', onAudioDurationChange);
   audio.addEventListener('ended', onAudioEnded);
   audio.addEventListener('play', function () { btnPlay.innerHTML = '&#9646;&#9646;'; });
   audio.addEventListener('pause', function () { btnPlay.textContent = '\u25B6'; });
 
-  // Controls
   btnPlay.addEventListener('click', onPlayPause);
   btnPrev.addEventListener('click', prevChapter);
   btnNext.addEventListener('click', nextChapter);
@@ -317,19 +407,16 @@ document.addEventListener('DOMContentLoaded', function () {
     audio.playbackRate = parseFloat(speedSelect.value);
   });
 
-  // Seek bar
   seekBar.addEventListener('mousedown', onSeekStart);
   seekBar.addEventListener('touchstart', onSeekStart, { passive: true });
   seekBar.addEventListener('input', onSeekInput);
   seekBar.addEventListener('mouseup', onSeekEnd);
   seekBar.addEventListener('touchend', onSeekEnd);
 
-  // Sidebar
   if (chaptersToggle) chaptersToggle.addEventListener('click', openSidebar);
   if (sidebarClose)   sidebarClose.addEventListener('click', closeSidebar);
   if (sidebarOverlay) sidebarOverlay.addEventListener('click', closeSidebar);
 
-  // Load index
   if (window.INKWRIGHT_INDEX_URL) {
     loadIndex(window.INKWRIGHT_INDEX_URL);
   }
