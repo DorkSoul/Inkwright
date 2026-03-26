@@ -15,6 +15,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Optional: Japanese and Chinese G2P support for Kokoro.
+# These extras have native-code dependencies that may not build on all
+# platforms — failure here is non-fatal; ja/zh synthesis will simply be
+# unavailable if the packages are missing.
+RUN pip install --no-cache-dir "misaki[ja,zh]" \
+    || pip install --no-cache-dir "misaki[ja]" \
+    || echo "WARNING: Japanese/Chinese language support could not be installed; ja/zh voices will not be available."
+
 # ---------------------------------------------------------------------------
 # Pre-download Kokoro model weights and all 52 voice files at build time.
 # Creates one pipeline per language to trigger language-specific model downloads.
