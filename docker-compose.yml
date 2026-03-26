@@ -1,0 +1,17 @@
+services:
+  inkwright:
+    image: ghcr.io/dorksoul/inkwright:latest
+    container_name: inkwright
+    ports:
+      - "8084:8084"
+    volumes:
+      - /path/to/config:/config        # DB, covers, previews, favourites
+      - /path/to/books:/books          # EPUB files
+      - /path/to/audiobooks:/audiobooks  # Generated MP3s + index files
+    environment:
+      - BOOKS_DIR=/books
+      - AUDIOBOOKS_DIR=/audiobooks
+      - CONFIG_DIR=/config
+      - PORT=8084
+      # - SECRET_KEY=change-me         # Optional: set a stable secret key
+    restart: unless-stopped

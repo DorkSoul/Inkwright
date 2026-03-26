@@ -1,0 +1,517 @@
+{% extends "base.html" %}
+{% block title %}{{ book.title }} — Inkwright{% endblock %}
+
+{# Reusable voice + speed controls — included in every generate form #}
+{% macro tts_controls(voice_id, speed_id, preview_id) %}
+  <div class="tts-controls">
+    <div class="tts-control-row">
+      <label>Voice</label>
+      {# Custom voice picker — replaces <select> so stars are clickable #}
+      <div class="vp" id="{{ voice_id }}-vp">
+        <button type="button" class="vp-trigger" aria-haspopup="listbox">
+          <span class="vp-trigger-label">{{ voice_labels[book.tts_voice] if book.tts_voice else 'Heart' }}</span>
+          <span class="vp-arrow">&#9660;</span>
+        </button>
+        <input type="hidden" name="voice" value="{{ book.tts_voice or 'af_heart' }}">
+        <div class="vp-panel" role="listbox" hidden>
+
+          {# Favourites group — hidden if none starred #}
+          <div class="vp-group vp-fav-group" {% if not favourites %}style="display:none"{% endif %}>
+            <div class="vp-group-label">Favourites</div>
+            {% for v in available_voices if v in favourites %}
+            <div class="vp-option {% if v == (book.tts_voice or 'af_heart') %}vp-option--active{% endif %}"
+                 role="option" data-value="{{ v }}" data-label="{{ voice_labels[v] }}">
+              <span class="vp-name">{{ voice_labels[v] }}</span>
+              <button type="button" class="vp-star vp-star--filled" data-voice="{{ v }}" title="Remove from favourites">&#9733;</button>
+            </div>
+            {% endfor %}
+          </div>
+
+          {% for prefix, group_label in [('af_', 'American Female'), ('am_', 'American Male'), ('bf_', 'British Female'), ('bm_', 'British Male')] %}
+          <div class="vp-group">
+            <div class="vp-group-label">{{ group_label }}</div>
+            {% for v in available_voices if v.startswith(prefix) %}
+            <div class="vp-option {% if v == (book.tts_voice or 'af_heart') %}vp-option--active{% endif %}"
+                 role="option" data-value="{{ v }}" data-label="{{ voice_labels[v] }}">
+              <span class="vp-name">{{ voice_labels[v] }}</span>
+              <button type="button"
+                      class="vp-star {% if v in favourites %}vp-star--filled{% endif %}"
+                      data-voice="{{ v }}"
+                      title="{% if v in favourites %}Remove from favourites{% else %}Add to favourites{% endif %}">
+                {% if v in favourites %}&#9733;{% else %}&#9734;{% endif %}
+              </button>
+            </div>
+            {% endfor %}
+          </div>
+          {% endfor %}
+
+        </div>{# /vp-panel #}
+      </div>{# /vp #}
+    </div>
+    <div class="tts-control-row">
+      <label for="{{ speed_id }}">Speed</label>
+      <select id="{{ speed_id }}" name="speed" class="voice-select">
+        {% set current_speed = book.tts_speed if book.tts_speed else 1.0 %}
+        <option value="0.7" {% if current_speed == 0.7 %}selected{% endif %}>0.7× — Very slow</option>
+        <option value="0.8" {% if current_speed == 0.8 %}selected{% endif %}>0.8× — Slow</option>
+        <option value="0.9" {% if current_speed == 0.9 %}selected{% endif %}>0.9× — Slightly slow</option>
+        <option value="1.0" {% if current_speed == 1.0 or not current_speed %}selected{% endif %}>1.0× — Normal</option>
+        <option value="1.1" {% if current_speed == 1.1 %}selected{% endif %}>1.1× — Slightly fast</option>
+        <option value="1.2" {% if current_speed == 1.2 %}selected{% endif %}>1.2× — Fast</option>
+        <option value="1.3" {% if current_speed == 1.3 %}selected{% endif %}>1.3× — Very fast</option>
+      </select>
+    </div>
+    <div class="tts-control-row preview-row">
+      <button type="button" class="btn btn-secondary preview-btn" id="{{ preview_id }}"
+              data-book-id="{{ book.id }}">
+        Preview Voice
+      </button>
+      <span class="preview-status" id="{{ preview_id }}-status"></span>
+    </div>
+    <div class="preview-player" id="{{ preview_id }}-player" style="display:none">
+      <audio controls src="/book/{{ book.id }}/preview.mp3" style="width:100%"></audio>
+      <p class="preview-note">~45 s sample from a random point in the book</p>
+    </div>
+  </div>
+{% endmacro %}
+
+{% block content %}
+<div class="detail-layout">
+  <div class="detail-cover">
+    {% if book.cover_image_path %}
+      <img src="{{ url_for('serve_cover', filename=book.cover_image_path) }}" alt="Cover for {{ book.title }}">
+    {% else %}
+      <div class="cover-placeholder cover-placeholder--large">
+        <span>{{ book.title[:2].upper() }}</span>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="detail-meta">
+    <h1 class="detail-title">{{ book.title }}</h1>
+    <p class="detail-author">by {{ book.author or 'Unknown' }}</p>
+    {% if file_size_mb %}
+      <p class="detail-filesize">{{ file_size_mb }} MB</p>
+    {% endif %}
+
+    <div class="detail-actions">
+
+      {# ---- No audio ---- #}
+      {% if book.tts_status.value == 'none' %}
+      <form action="{{ url_for('generate_book', book_id=book.id) }}" method="post" class="generate-form">
+        {{ tts_controls('voice-select', 'speed-select', 'preview-none') }}
+        <button type="submit" class="btn btn-primary">Generate Audiobook</button>
+      </form>
+
+      {# ---- Queued or processing ---- #}
+      {% elif book.tts_status.value in ('queued', 'processing') %}
+      <div class="progress-section" id="progress-section">
+        <p class="progress-label" id="progress-label">
+          {% if book.tts_status.value == 'queued' %}Queued...{% else %}Processing...{% endif %}
+        </p>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="progress-fill" style="width: {{ book.tts_progress_pct }}%"></div>
+        </div>
+        <p class="progress-pct" id="progress-pct">{{ book.tts_progress_pct | int }}%</p>
+      </div>
+
+      {# ---- Done ---- #}
+      {% elif book.tts_status.value == 'done' %}
+      <a href="{{ url_for('play_book', book_id=book.id) }}" class="btn btn-primary">Play Audiobook</a>
+
+      <details class="regen-details">
+        <summary class="regen-summary">Regenerate with different settings</summary>
+        <form action="{{ url_for('generate_book', book_id=book.id) }}" method="post" class="generate-form regen-form">
+          {{ tts_controls('voice-select-regen', 'speed-select-regen', 'preview-regen') }}
+          <button type="submit" class="btn btn-secondary"
+            onclick="return confirm('This will delete the existing audio and regenerate from scratch. Continue?')">
+            Regenerate
+          </button>
+        </form>
+      </details>
+
+      {# ---- Error ---- #}
+      {% elif book.tts_status.value == 'error' %}
+      <div class="error-box">
+        <p>Generation failed: {{ book.tts_error or 'Unknown error' }}</p>
+      </div>
+      <form action="{{ url_for('generate_book', book_id=book.id) }}" method="post" class="generate-form">
+        {{ tts_controls('voice-select-retry', 'speed-select-retry', 'preview-retry') }}
+        <button type="submit" class="btn btn-secondary">Retry</button>
+      </form>
+      {% endif %}
+
+      {# ---- Compare All Voices ---- #}
+      {% if book.tts_status.value not in ('queued', 'processing') %}
+      <details class="regen-details compare-all-details">
+        <summary class="regen-summary">Compare All Voices</summary>
+        <div class="compare-all-body">
+          <div class="tts-control-row">
+            <label for="compare-speed">Speed</label>
+            <select id="compare-speed" class="voice-select">
+              <option value="0.7">0.7× — Very slow</option>
+              <option value="0.8">0.8× — Slow</option>
+              <option value="0.9">0.9× — Slightly slow</option>
+              <option value="1.0" selected>1.0× — Normal</option>
+              <option value="1.1">1.1× — Slightly fast</option>
+              <option value="1.2">1.2× — Fast</option>
+              <option value="1.3">1.3× — Very fast</option>
+            </select>
+          </div>
+          <p class="preview-note">Generates a ~45 s sample from the same passage for every voice so you can compare them side by side.</p>
+          <button type="button" class="btn btn-secondary" id="compare-all-btn"
+                  data-book-id="{{ book.id }}">Start Comparison</button>
+          <span class="preview-status" id="compare-all-status"></span>
+
+          <div class="compare-grid" id="compare-grid">
+            {% for prefix, group_label in [('af_', 'American Female'), ('am_', 'American Male'), ('bf_', 'British Female'), ('bm_', 'British Male')] %}
+            <div class="compare-group">
+              <div class="compare-group-label">{{ group_label }}</div>
+              {% for v in available_voices if v.startswith(prefix) %}
+              <div class="compare-row" id="compare-row-{{ v }}" data-voice="{{ v }}">
+                <span class="compare-voice-name">{{ voice_labels[v] }}</span>
+                <span class="compare-voice-status" id="compare-status-{{ v }}"></span>
+                <div class="compare-player" id="compare-player-{{ v }}" style="display:none">
+                  <audio controls style="width:100%"></audio>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
+      {% endif %}
+
+    </div>
+
+    <div class="detail-danger">
+      <button class="btn btn-danger" onclick="deleteBook({{ book.id }})">Delete Book</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if book.tts_status.value in ('queued', 'processing') %}
+<script>
+(function () {
+  var bookId = {{ book.id }};
+  var pollInterval = 3000;
+  var timer;
+
+  function poll() {
+    fetch('/book/' + bookId + '/status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var label = document.getElementById('progress-label');
+        var fill  = document.getElementById('progress-fill');
+        var pct   = document.getElementById('progress-pct');
+
+        if (data.status === 'queued') {
+          label.textContent = 'Queued...';
+          fill.style.width = '0%';
+          pct.textContent = '0%';
+          timer = setTimeout(poll, pollInterval);
+
+        } else if (data.status === 'processing') {
+          label.textContent = 'Processing...';
+          var p = data.tts_progress_pct || 0;
+          fill.style.width = p + '%';
+          pct.textContent = Math.round(p) + '%';
+          timer = setTimeout(poll, pollInterval);
+
+        } else if (data.status === 'done') {
+          window.location.reload();
+
+        } else if (data.status === 'error') {
+          window.location.reload();
+        }
+      })
+      .catch(function() {
+        timer = setTimeout(poll, pollInterval);
+      });
+  }
+
+  timer = setTimeout(poll, pollInterval);
+})();
+</script>
+{% endif %}
+
+<script>
+function deleteBook(id) {
+  if (!confirm('Delete this book and all associated audio? This cannot be undone.')) return;
+  fetch('/book/' + id, { method: 'DELETE' })
+    .then(function() { window.location.href = '/'; });
+}
+
+// ---------------------------------------------------------------------------
+// Custom voice picker
+// ---------------------------------------------------------------------------
+(function () {
+  // Close any open panel when clicking outside
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.vp')) {
+      document.querySelectorAll('.vp-panel:not([hidden])').forEach(function (p) {
+        p.hidden = true;
+        p.closest('.vp').querySelector('.vp-trigger').setAttribute('aria-expanded', 'false');
+      });
+    }
+  });
+
+  document.querySelectorAll('.vp').forEach(function (vp) {
+    var trigger = vp.querySelector('.vp-trigger');
+    var panel   = vp.querySelector('.vp-panel');
+    var hidden  = vp.querySelector('input[type=hidden]');
+    var label   = vp.querySelector('.vp-trigger-label');
+
+    // Toggle panel
+    trigger.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var isOpen = !panel.hidden;
+      // Close all others first
+      document.querySelectorAll('.vp-panel:not([hidden])').forEach(function (p) {
+        p.hidden = true;
+      });
+      panel.hidden = isOpen;
+      trigger.setAttribute('aria-expanded', String(!isOpen));
+    });
+
+    // Select a voice
+    panel.addEventListener('click', function (e) {
+      var option = e.target.closest('.vp-option');
+      var star   = e.target.closest('.vp-star');
+
+      if (star) return; // handled separately
+
+      if (option) {
+        var value = option.dataset.value;
+        var lbl   = option.dataset.label;
+        // Update hidden input + trigger label
+        hidden.value = value;
+        label.textContent = lbl;
+        // Mark active in all pickers
+        document.querySelectorAll('.vp-option[data-value="' + value + '"]').forEach(function (o) {
+          o.classList.add('vp-option--active');
+        });
+        document.querySelectorAll('.vp-option:not([data-value="' + value + '"])').forEach(function (o) {
+          o.classList.remove('vp-option--active');
+        });
+        panel.hidden = true;
+      }
+    });
+
+    // Star toggle
+    panel.addEventListener('click', function (e) {
+      var star = e.target.closest('.vp-star');
+      if (!star) return;
+      e.stopPropagation();
+
+      var voice = star.dataset.voice;
+      fetch('/voices/favourite', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({voice: voice}),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          updateAllStars(voice, data.favourited);
+          updateAllFavGroups(data.favourites);
+        });
+    });
+  });
+
+  function updateAllStars(voice, favourited) {
+    document.querySelectorAll('.vp-star[data-voice="' + voice + '"]').forEach(function (s) {
+      s.classList.toggle('vp-star--filled', favourited);
+      s.innerHTML = favourited ? '&#9733;' : '&#9734;';
+      s.title = favourited ? 'Remove from favourites' : 'Add to favourites';
+    });
+  }
+
+  function updateAllFavGroups(favourites) {
+    document.querySelectorAll('.vp').forEach(function (vp) {
+      var favGroup = vp.querySelector('.vp-fav-group');
+      if (!favGroup) return;
+
+      // Rebuild the fav group rows from the master option list in this picker
+      var allOptions = Array.from(vp.querySelectorAll('.vp-group:not(.vp-fav-group) .vp-option'));
+      favGroup.querySelectorAll('.vp-option').forEach(function (o) { o.remove(); });
+
+      favourites.forEach(function (voice) {
+        var src = allOptions.find(function (o) { return o.dataset.value === voice; });
+        if (!src) return;
+        var clone = src.cloneNode(true);
+        // Keep star filled in the fav group copy
+        var s = clone.querySelector('.vp-star');
+        s.classList.add('vp-star--filled');
+        s.innerHTML = '&#9733;';
+        favGroup.appendChild(clone);
+      });
+
+      favGroup.style.display = favourites.length ? '' : 'none';
+    });
+  }
+})();
+
+// ---------------------------------------------------------------------------
+// Preview voice
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.preview-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var bookId   = btn.dataset.bookId;
+      var btnId    = btn.id;
+      var statusEl = document.getElementById(btnId + '-status');
+      var playerEl = document.getElementById(btnId + '-player');
+
+      // Find the voice/speed selects that live in the same tts-controls block
+      var controls  = btn.closest('.tts-controls');
+      var voiceVal  = controls.querySelector('select[name="voice"]').value;
+      var speedVal  = controls.querySelector('select[name="speed"]').value;
+
+      // Reset player
+      playerEl.style.display = 'none';
+      var audio = playerEl.querySelector('audio');
+      audio.pause();
+      audio.removeAttribute('src');
+
+      btn.disabled = true;
+      statusEl.textContent = 'Generating preview…';
+
+      var body = new FormData();
+      body.append('voice', voiceVal);
+      body.append('speed', speedVal);
+
+      fetch('/book/' + bookId + '/preview', { method: 'POST', body: body })
+        .then(function (r) { return r.json(); })
+        .then(function () { pollPreview(bookId, btnId, statusEl, playerEl, audio); })
+        .catch(function () {
+          statusEl.textContent = 'Error starting preview.';
+          btn.disabled = false;
+        });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Compare All Voices
+// ---------------------------------------------------------------------------
+(function () {
+  var btn = document.getElementById('compare-all-btn');
+  if (!btn) return;
+
+  var bookId    = btn.dataset.bookId;
+  var statusEl  = document.getElementById('compare-all-status');
+  var pollTimer = null;
+
+  btn.addEventListener('click', function () {
+    var speed = document.getElementById('compare-speed').value;
+    btn.disabled = true;
+    statusEl.textContent = 'Starting…';
+
+    // Reset all rows
+    document.querySelectorAll('.compare-row').forEach(function (row) {
+      var voice = row.dataset.voice;
+      document.getElementById('compare-status-' + voice).textContent = '';
+      var player = document.getElementById('compare-player-' + voice);
+      player.style.display = 'none';
+      var audio = player.querySelector('audio');
+      audio.pause();
+      audio.removeAttribute('src');
+    });
+
+    var body = new FormData();
+    body.append('speed', speed);
+
+    fetch('/book/' + bookId + '/preview-all', { method: 'POST', body: body })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        statusEl.textContent = 'Generating previews…';
+        schedulePoll();
+      })
+      .catch(function () {
+        statusEl.textContent = 'Error starting comparison.';
+        btn.disabled = false;
+      });
+  });
+
+  function schedulePoll() {
+    pollTimer = setTimeout(pollCompare, 2000);
+  }
+
+  function pollCompare() {
+    fetch('/book/' + bookId + '/preview-all/status')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var voices  = data.voices || {};
+        var allDone = true;
+
+        Object.keys(voices).forEach(function (voice) {
+          var state    = voices[voice];
+          var statusEl = document.getElementById('compare-status-' + voice);
+          var playerEl = document.getElementById('compare-player-' + voice);
+          if (!statusEl) return;
+
+          if (state === 'pending') {
+            statusEl.textContent = 'Pending…';
+            allDone = false;
+          } else if (state === 'generating') {
+            statusEl.textContent = 'Generating…';
+            allDone = false;
+          } else if (state === 'ready') {
+            if (playerEl.style.display === 'none') {
+              statusEl.textContent = '';
+              var audio = playerEl.querySelector('audio');
+              audio.src = '/book/' + bookId + '/preview/' + voice + '.mp3?t=' + Date.now();
+              playerEl.style.display = 'block';
+            }
+          } else if (state === 'error') {
+            statusEl.textContent = 'Failed';
+          }
+        });
+
+        if (data.status === 'done' || data.status === 'error') {
+          statusEl = document.getElementById('compare-all-status');
+          statusEl.textContent = data.status === 'done' ? 'All done!' : 'Completed with some errors.';
+          btn.disabled = false;
+          btn.textContent = 'Regenerate Comparison';
+        } else {
+          schedulePoll();
+        }
+      })
+      .catch(function () {
+        schedulePoll();
+      });
+  }
+})();
+
+function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
+  fetch('/book/' + bookId + '/preview/status')
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var btn = document.getElementById(btnId);
+      if (data.status === 'generating') {
+        setTimeout(function () {
+          pollPreview(bookId, btnId, statusEl, playerEl, audio);
+        }, 2000);
+      } else if (data.status === 'ready') {
+        statusEl.textContent = '';
+        btn.disabled = false;
+        btn.textContent = 'Preview again';
+        // Force the browser to reload the audio file
+        audio.src = '/book/' + bookId + '/preview.mp3?t=' + Date.now();
+        playerEl.style.display = 'block';
+      } else {
+        statusEl.textContent = 'Preview failed: ' + (data.error || 'unknown error');
+        btn.disabled = false;
+      }
+    })
+    .catch(function () {
+      setTimeout(function () {
+        pollPreview(bookId, btnId, statusEl, playerEl, audio);
+      }, 2000);
+    });
+}
+</script>
+{% endblock %}

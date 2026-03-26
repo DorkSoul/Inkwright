@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% set back_url = url_for('book_detail', book_id=book.id) %}
+{% set back_label = 'Back to Book' %}
+
+{% block title %}{{ book.title }} — Player — Inkwright{% endblock %}
+
+{% block content %}
+<div class="player-layout" id="player-layout">
+
+  <!-- Sidebar -->
+  <aside class="player-sidebar" id="player-sidebar">
+    <div class="sidebar-header">
+      <span>Chapters</span>
+      <button class="sidebar-close" id="sidebar-close" aria-label="Close chapters">&#x2715;</button>
+    </div>
+    <ol class="chapter-list" id="chapter-list">
+      <!-- Populated by player.js -->
+    </ol>
+  </aside>
+
+  <!-- Overlay for mobile drawer -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Main player area -->
+  <div class="player-main">
+
+    <!-- Top bar -->
+    <div class="player-topbar">
+      <button class="btn-icon" id="chapters-toggle" aria-label="Toggle chapters">
+        &#9776;
+      </button>
+      <span class="player-chapter-title" id="player-chapter-title">Loading...</span>
+    </div>
+
+    <!-- Paragraph reading area -->
+    <div class="paragraph-area" id="paragraph-area">
+      <!-- Populated by player.js -->
+    </div>
+
+    <!-- Controls bar -->
+    <div class="player-controls">
+      <div class="controls-row">
+        <button class="btn-icon" id="btn-prev-chapter" title="Previous chapter">&#x23EE;</button>
+        <button class="btn-icon btn-play" id="btn-play" title="Play/Pause">&#x25B6;</button>
+        <button class="btn-icon" id="btn-next-chapter" title="Next chapter">&#x23ED;</button>
+        <select class="speed-select" id="speed-select" title="Playback speed">
+          <option value="0.75">0.75x</option>
+          <option value="1" selected>1x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+        </select>
+      </div>
+      <div class="controls-row seek-row">
+        <span class="time-display" id="time-current">0:00</span>
+        <input type="range" class="seek-bar" id="seek-bar" min="0" max="1000" value="0" step="1">
+        <span class="time-display" id="time-total">0:00</span>
+      </div>
+      <div class="progress-track">
+        <div class="progress-track-fill" id="progress-track-fill"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Hidden audio element -->
+<audio id="audio" preload="none">
+  <source src="{{ url_for('serve_audio', book_id=book.id) }}" type="audio/mpeg">
+</audio>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.INKWRIGHT_BOOK_ID = {{ book.id }};
+  window.INKWRIGHT_INDEX_URL = "{{ url_for('serve_index', book_id=book.id) }}";
+</script>
+<script src="{{ url_for('static', filename='player.js') }}"></script>
+{% endblock %}

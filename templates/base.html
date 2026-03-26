@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Inkwright{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='inkwright_icon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="{{ body_class | default('') }}">
+  <header class="site-header">
+    <a href="{{ url_for('library') }}" class="site-title">
+      <img src="{{ url_for('static', filename='inkwright_icon.svg') }}" alt="" class="site-logo">
+      Inkwright
+    </a>
+    <nav class="site-nav">
+      <a href="{{ back_url | default(url_for('library')) }}" class="btn-library">&#8592; {{ back_label | default('Library') }}</a>
+      <label class="upload-btn" for="upload-input">+ Upload EPUB</label>
+      <form id="upload-form" action="{{ url_for('upload_book') }}" method="post" enctype="multipart/form-data">
+        <input
+          id="upload-input"
+          type="file"
+          name="epub"
+          accept=".epub"
+          style="display:none"
+          onchange="document.getElementById('upload-form').submit()"
+        >
+      </form>
+    </nav>
+  </header>
+
+  <main class="site-main">
+    {% block content %}{% endblock %}
+  </main>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>
