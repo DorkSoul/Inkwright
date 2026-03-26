@@ -6,6 +6,7 @@ RUN apt-get update && \
         espeak-ng \
         ffmpeg \
         libsndfile1 \
+        calibre \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

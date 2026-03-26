@@ -3,6 +3,8 @@ import logging
 import mimetypes
 import os
 import random
+import subprocess
+import tempfile
 import threading
 from datetime import datetime
 
@@ -44,6 +46,19 @@ _preview_lock = threading.Lock()
 
 PREVIEW_TARGET_CHARS = 700   # ~45–60 s of speech at 1× speed
 
+# Formats Calibre can convert to EPUB (PDF excluded — quality too variable)
+CONVERTIBLE_EXTENSIONS = {
+    '.mobi', '.azw', '.azw3',   # Kindle
+    '.fb2',                      # FictionBook
+    '.lit',                      # Microsoft LIT
+    '.pdb',                      # Palm
+    '.rtf',                      # Rich Text
+    '.txt',                      # Plain text
+    '.docx',                     # Word
+    '.html', '.htm',             # Web
+}
+ACCEPTED_EXTENSIONS = {'.epub'} | CONVERTIBLE_EXTENSIONS
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = MAX_UPLOAD_MB * 1024 * 1024
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
@@ -76,6 +91,16 @@ def _get_book_or_404(book_id: int, session):
     if book is None:
         abort(404)
     return book
+
+
+def _convert_to_epub(src_path: str, dest_epub_path: str):
+    """Convert a non-EPUB file to EPUB using Calibre's ebook-convert CLI."""
+    result = subprocess.run(
+        ['ebook-convert', src_path, dest_epub_path],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or 'ebook-convert failed')
 
 
 def _epub_metadata(epub_path: str) -> tuple[str, str]:
@@ -115,22 +140,39 @@ def upload_book():
     if not f.filename:
         abort(400, 'No file selected')
 
-    if not f.filename.lower().endswith('.epub'):
-        abort(400, 'Only .epub files are accepted')
+    _, upload_ext = os.path.splitext(f.filename.lower())
+    if upload_ext not in ACCEPTED_EXTENSIONS:
+        abort(400, f'Unsupported format: {upload_ext}. '
+              f'Accepted: {", ".join(sorted(ACCEPTED_EXTENSIONS))}')
 
-    # Save file
-    safe_name = os.path.basename(f.filename)
+    # Determine final EPUB filename (strip original extension, add .epub)
+    original_base = os.path.splitext(os.path.basename(f.filename))[0]
+    safe_base = original_base
+    safe_name = safe_base + '.epub'
     dest_path = os.path.join(BOOKS_DIR, safe_name)
 
     # Avoid collisions
-    base, ext = os.path.splitext(safe_name)
     counter = 1
     while os.path.exists(dest_path):
-        safe_name = f"{base}_{counter}{ext}"
+        safe_name = f"{safe_base}_{counter}.epub"
         dest_path = os.path.join(BOOKS_DIR, safe_name)
         counter += 1
 
-    f.save(dest_path)
+    if upload_ext == '.epub':
+        f.save(dest_path)
+    else:
+        # Save original to a temp file, convert to EPUB, then clean up
+        with tempfile.NamedTemporaryFile(suffix=upload_ext, delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            f.save(tmp_path)
+            logger.info("Converting %s → EPUB for %s", upload_ext, safe_name)
+            _convert_to_epub(tmp_path, dest_path)
+        except Exception as e:
+            logger.error("Conversion failed: %s", e)
+            abort(400, f'Could not convert {upload_ext} to EPUB: {e}')
+        finally:
+            os.unlink(tmp_path)
 
     # Extract metadata
     title, author = _epub_metadata(dest_path)
