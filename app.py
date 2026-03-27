@@ -272,6 +272,15 @@ def book_detail(book_id):
 
         from tts_engine import (AVAILABLE_VOICES, VOICE_LABELS, VOICES_BY_LANGUAGE,
                                 LANGUAGES, voice_gender_groups)
+
+        # Which preview files exist on disk so the template can show them on load
+        preview_exists = os.path.exists(
+            os.path.join(PREVIEWS_DIR, f"{book_id}_preview.mp3"))
+        existing_voice_previews = [
+            v for v in AVAILABLE_VOICES
+            if os.path.exists(os.path.join(PREVIEWS_DIR, f"{book_id}_{v}_preview.mp3"))
+        ]
+
         return render_template(
             'book_detail.html',
             book=book,
@@ -282,6 +291,8 @@ def book_detail(book_id):
             languages=LANGUAGES,
             voice_gender_groups=voice_gender_groups,
             favourites=_load_favourites(),
+            preview_exists=preview_exists,
+            existing_voice_previews=existing_voice_previews,
         )
     finally:
         session.close()
@@ -689,6 +700,25 @@ def preview_status(book_id):
     })
 
 
+@app.route('/book/<int:book_id>/previews', methods=['DELETE'])
+def delete_previews(book_id):
+    """Delete all cached preview audio files for this book."""
+    from tts_engine import AVAILABLE_VOICES
+    count = 0
+    paths = [os.path.join(PREVIEWS_DIR, f"{book_id}_preview.mp3")] + [
+        os.path.join(PREVIEWS_DIR, f"{book_id}_{v}_preview.mp3")
+        for v in AVAILABLE_VOICES
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            os.remove(p)
+            count += 1
+    with _preview_lock:
+        _preview_jobs.pop(book_id, None)
+        _preview_all_jobs.pop(book_id, None)
+    return jsonify({'deleted': count})
+
+
 @app.route('/book/<int:book_id>/preview.mp3')
 def serve_preview(book_id):
     path = os.path.join(PREVIEWS_DIR, f"{book_id}_preview.mp3")
@@ -734,12 +764,12 @@ def _sample_paragraphs(epub_path: str) -> list:
     return selected or [paragraphs[0].text]
 
 
-def _run_preview_all(book_id: int, epub_path: str, speed: float):
+def _run_preview_all(book_id: int, epub_path: str, speed: float, voices: list):
     """
-    Background thread: synthesise the same passage with every available voice,
+    Background thread: synthesise the same passage with the given voices,
     one at a time, updating _preview_all_jobs[book_id] as each voice completes.
     """
-    from tts_engine import AVAILABLE_VOICES, TTSEngine
+    from tts_engine import TTSEngine
     from audio_utils import audio_to_mp3
 
     try:
@@ -752,7 +782,7 @@ def _run_preview_all(book_id: int, epub_path: str, speed: float):
         logger.error("Preview-all failed to sample EPUB for book %d: %s", book_id, e)
         return
 
-    for voice in AVAILABLE_VOICES:
+    for voice in voices:
         with _preview_lock:
             if _preview_all_jobs.get(book_id, {}).get('status') == 'cancelled':
                 return
@@ -795,6 +825,14 @@ def start_preview_all(book_id):
         speed = 1.0
 
     from tts_engine import AVAILABLE_VOICES
+    # Optional: only generate a subset of voices
+    voices_param = request.form.get('voices', '').strip()
+    if voices_param:
+        selected = [v for v in voices_param.split(',') if v.strip() in AVAILABLE_VOICES]
+        voices_to_run = selected if selected else list(AVAILABLE_VOICES)
+    else:
+        voices_to_run = list(AVAILABLE_VOICES)
+
     with _preview_lock:
         if _preview_all_jobs.get(book_id, {}).get('status') == 'generating':
             return jsonify({'status': 'generating',
@@ -802,12 +840,12 @@ def start_preview_all(book_id):
         _preview_all_jobs[book_id] = {
             'status': 'generating',
             'speed': speed,
-            'voices': {v: 'pending' for v in AVAILABLE_VOICES},
+            'voices': {v: 'pending' for v in voices_to_run},
         }
 
     threading.Thread(
         target=_run_preview_all,
-        args=(book_id, epub_path, speed),
+        args=(book_id, epub_path, speed, voices_to_run),
         daemon=True,
     ).start()
 
@@ -817,13 +855,35 @@ def start_preview_all(book_id):
 
 @app.route('/book/<int:book_id>/preview-all/status')
 def preview_all_status(book_id):
+    from tts_engine import AVAILABLE_VOICES
     with _preview_lock:
         job = dict(_preview_all_jobs.get(book_id, {}))
+
+    # Merge in disk-cached files so previews survive page refresh
+    def _disk_voices():
+        return {
+            v: 'ready'
+            for v in AVAILABLE_VOICES
+            if os.path.exists(os.path.join(PREVIEWS_DIR, f"{book_id}_{v}_preview.mp3"))
+        }
+
     if not job:
-        return jsonify({'status': 'none', 'voices': {}})
+        return jsonify({'status': 'none', 'voices': _disk_voices()})
+
+    # Overlay disk-ready files onto the in-memory state
+    voices = dict(job.get('voices', {}))
+    disk = _disk_voices()
+    for v, state in voices.items():
+        if state in ('pending',) and v in disk:
+            voices[v] = 'ready'
+    # Also include any voices on disk that weren't in this job (from a previous run)
+    for v, state in disk.items():
+        if v not in voices:
+            voices[v] = 'ready'
+
     return jsonify({
         'status': job.get('status', 'none'),
-        'voices': job.get('voices', {}),
+        'voices': voices,
     })
 
 

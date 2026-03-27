@@ -10,6 +10,7 @@ window.VOICE_DATA = {
   languages:          {{ languages          | tojson }},
   favourites:         {{ favourites         | tojson }},
 };
+window.EXISTING_VOICE_PREVIEWS = {{ existing_voice_previews | tojson }};
 </script>
 
 {# ── Progress polling (queued / processing only) ── #}
@@ -288,32 +289,74 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   });
 
-  // ── Compare All Voices ───────────────────────────────────────────────────
+  // ── Compare Voices ───────────────────────────────────────────────────────
   var compareBtn = document.getElementById('compare-all-btn');
   if (compareBtn) {
     var cBookId   = compareBtn.dataset.bookId;
     var cStatusEl = document.getElementById('compare-all-status');
 
+    // ── Selection controls ──
+    document.getElementById('compare-sel-all').addEventListener('click', function() {
+      document.querySelectorAll('.compare-voice-check').forEach(function(cb) { cb.checked = true; });
+    });
+    document.getElementById('compare-sel-none').addEventListener('click', function() {
+      document.querySelectorAll('.compare-voice-check').forEach(function(cb) { cb.checked = false; });
+    });
+    document.getElementById('compare-sel-favs').addEventListener('click', function() {
+      document.querySelectorAll('.compare-voice-check').forEach(function(cb) {
+        cb.checked = VD.favourites.indexOf(cb.value) !== -1;
+      });
+    });
+    document.querySelectorAll('.compare-sel-lang').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var lang = btn.dataset.lang;
+        // Toggle: if all in this lang are checked, uncheck them; otherwise check all
+        var group = document.querySelector('.compare-group[data-lang="' + lang + '"]');
+        if (!group) return;
+        var cbs = group.querySelectorAll('.compare-voice-check');
+        var allChecked = Array.from(cbs).every(function(cb) { return cb.checked; });
+        cbs.forEach(function(cb) { cb.checked = !allChecked; });
+      });
+    });
+
+    // ── Start comparison ──
     compareBtn.addEventListener('click', function() {
       var speed = document.getElementById('compare-speed').value;
+      var selectedVoices = [];
+      document.querySelectorAll('.compare-voice-check:checked').forEach(function(cb) {
+        selectedVoices.push(cb.value);
+      });
+      if (!selectedVoices.length) {
+        cStatusEl.textContent = 'Select at least one voice.';
+        return;
+      }
+
       compareBtn.disabled = true;
       cStatusEl.textContent = 'Starting…';
 
-      document.querySelectorAll('.compare-row').forEach(function(row) {
-        var v = row.dataset.voice;
-        document.getElementById('compare-status-' + v).textContent = '';
+      // Clear players only for selected voices
+      selectedVoices.forEach(function(v) {
+        var statusEl = document.getElementById('compare-status-' + v);
         var pl = document.getElementById('compare-player-' + v);
-        pl.style.display = 'none';
-        var a = pl.querySelector('audio');
-        a.pause(); a.removeAttribute('src');
+        if (statusEl) statusEl.textContent = '';
+        if (pl) {
+          pl.style.display = 'none';
+          var a = pl.querySelector('audio');
+          a.pause(); a.removeAttribute('src');
+        }
       });
 
       var body = new FormData();
       body.append('speed', speed);
+      body.append('voices', selectedVoices.join(','));
 
       fetch('/book/' + cBookId + '/preview-all', { method: 'POST', body: body })
         .then(function(r) { return r.json(); })
-        .then(function() { cStatusEl.textContent = 'Generating previews…'; scheduleComparePoll(); })
+        .then(function() {
+          var n = selectedVoices.length;
+          cStatusEl.textContent = 'Generating ' + n + ' preview' + (n !== 1 ? 's' : '') + '…';
+          scheduleComparePoll();
+        })
         .catch(function() { cStatusEl.textContent = 'Error.'; compareBtn.disabled = false; });
     });
 
@@ -324,15 +367,16 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
           var voices = data.voices || {};
+          var anyPending = false;
           Object.keys(voices).forEach(function(voice) {
             var state    = voices[voice];
             var statusEl = document.getElementById('compare-status-' + voice);
             var playerEl = document.getElementById('compare-player-' + voice);
             if (!statusEl) return;
-            if (state === 'pending')    { statusEl.textContent = 'Pending…'; }
-            else if (state === 'generating') { statusEl.textContent = 'Generating…'; }
+            if (state === 'pending')         { statusEl.textContent = 'Pending…'; anyPending = true; }
+            else if (state === 'generating') { statusEl.textContent = 'Generating…'; anyPending = true; }
             else if (state === 'ready') {
-              if (playerEl.style.display === 'none') {
+              if (playerEl && playerEl.style.display === 'none') {
                 statusEl.textContent = '';
                 var a = playerEl.querySelector('audio');
                 a.src = '/book/' + cBookId + '/preview/' + voice + '.mp3?t=' + Date.now();
@@ -340,15 +384,23 @@ document.addEventListener('DOMContentLoaded', function() {
               }
             } else if (state === 'error') { statusEl.textContent = 'Failed'; }
           });
-          if (data.status === 'done' || data.status === 'error') {
-            cStatusEl.textContent = data.status === 'done' ? 'All done!' : 'Completed with some errors.';
-            compareBtn.disabled = false;
-            compareBtn.textContent = 'Regenerate Comparison';
-          } else {
+          if (data.status === 'generating' || anyPending) {
             scheduleComparePoll();
+          } else {
+            var readyCount = Object.values(voices).filter(function(s){return s==='ready';}).length;
+            cStatusEl.textContent = readyCount + ' preview' + (readyCount !== 1 ? 's' : '') + ' ready' +
+              (data.status === 'error' ? ' (some failed)' : '');
+            compareBtn.disabled = false;
+            compareBtn.textContent = 'Generate Selected';
           }
         })
         .catch(scheduleComparePoll);
+    }
+
+    // On page load: if any voice previews exist on disk, show them
+    if (typeof window.EXISTING_VOICE_PREVIEWS !== 'undefined' && window.EXISTING_VOICE_PREVIEWS.length) {
+      var n = window.EXISTING_VOICE_PREVIEWS.length;
+      cStatusEl.textContent = n + ' cached preview' + (n !== 1 ? 's' : '') + ' (from previous session)';
     }
   }
 });
@@ -361,6 +413,11 @@ function deleteBook(id) {
 function deleteAudio(id) {
   if (!confirm('Delete the generated audio? The book will remain and can be regenerated.')) return;
   fetch('/book/' + id + '/audio', { method: 'DELETE' }).then(function() { window.location.reload(); });
+}
+function clearAllPreviews(id) {
+  if (!confirm('Delete all preview audio files for this book?')) return;
+  fetch('/book/' + id + '/previews', { method: 'DELETE' })
+    .then(function() { window.location.reload(); });
 }
 
 function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
@@ -464,12 +521,13 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
   {# Preview #}
   <div class="tts-control-row preview-row">
     <button type="button" class="btn btn-secondary preview-btn" id="{{ preview_id }}"
-            data-book-id="{{ book.id }}">Preview Voice</button>
+            data-book-id="{{ book.id }}">{% if preview_exists %}Regenerate Preview{% else %}Preview Voice{% endif %}</button>
     <span class="preview-status" id="{{ preview_id }}-status"></span>
   </div>
-  <div class="preview-player" id="{{ preview_id }}-player" style="display:none">
+  <div class="preview-player" id="{{ preview_id }}-player"{% if not preview_exists %} style="display:none"{% endif %}>
     <audio controls src="/book/{{ book.id }}/preview.mp3" style="width:100%"></audio>
     <p class="preview-note">~45 s sample from the same passage in the book</p>
+    <button type="button" class="btn-link preview-clear-btn" onclick="clearAllPreviews({{ book.id }})">&#128465; Clear preview</button>
   </div>
 
 </div>
@@ -547,7 +605,7 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
       {# ── Compare All Voices ── #}
       {% if book.tts_status.value not in ('queued', 'processing') %}
       <details class="regen-details compare-all-details">
-        <summary class="regen-summary">Compare All Voices</summary>
+        <summary class="regen-summary">Compare Voices</summary>
         <div class="compare-all-body">
           <div class="tts-control-row">
             <label for="compare-speed">Speed</label>
@@ -561,23 +619,46 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
               <option value="1.3">1.3× — Very fast</option>
             </select>
           </div>
-          <p class="preview-note">Generates a ~45 s sample from the same passage for every voice.</p>
-          <button type="button" class="btn btn-secondary" id="compare-all-btn"
-                  data-book-id="{{ book.id }}">Start Comparison</button>
-          <span class="preview-status" id="compare-all-status"></span>
+          <p class="preview-note">Generates a ~45 s sample from the same passage for each selected voice.</p>
+
+          {# Voice selection toolbar #}
+          <div class="compare-select-bar">
+            <span class="compare-select-label">Select:</span>
+            <button type="button" class="btn-chip" id="compare-sel-all">All</button>
+            <button type="button" class="btn-chip" id="compare-sel-none">None</button>
+            <button type="button" class="btn-chip" id="compare-sel-favs">Favourites</button>
+            {% for lang_code, lang_name in languages.items() %}
+            <button type="button" class="btn-chip compare-sel-lang" data-lang="{{ lang_code }}">{{ lang_name }}</button>
+            {% endfor %}
+          </div>
+
+          <div class="compare-actions-row">
+            <button type="button" class="btn btn-secondary" id="compare-all-btn"
+                    data-book-id="{{ book.id }}">Generate Selected</button>
+            <span class="preview-status" id="compare-all-status"></span>
+            <button type="button" class="btn" id="compare-clear-btn"
+                    onclick="clearAllPreviews({{ book.id }})" style="margin-left:auto">&#128465; Clear previews</button>
+          </div>
 
           <div class="compare-grid" id="compare-grid">
             {% for lang_code, lang_name in languages.items() %}
             {% set lang_voices = voices_by_language.get(lang_code, {}) %}
             {% if lang_voices %}
-            <div class="compare-group">
+            <div class="compare-group" data-lang="{{ lang_code }}">
               <div class="compare-group-label">{{ lang_name }}</div>
               {% for v, v_label in lang_voices.items() %}
               <div class="compare-row" id="compare-row-{{ v }}" data-voice="{{ v }}">
-                <span class="compare-voice-name">{{ v_label }}</span>
-                <span class="compare-voice-status" id="compare-status-{{ v }}"></span>
-                <div class="compare-player" id="compare-player-{{ v }}" style="display:none">
-                  <audio controls style="width:100%"></audio>
+                <label class="compare-check-wrap">
+                  <input type="checkbox" class="compare-voice-check" value="{{ v }}" checked>
+                </label>
+                <div class="compare-row-info">
+                  <span class="compare-voice-name">{{ v_label }}</span>
+                  <span class="compare-voice-status" id="compare-status-{{ v }}"></span>
+                </div>
+                <div class="compare-player" id="compare-player-{{ v }}"
+                     {% if v not in existing_voice_previews %}style="display:none"{% endif %}>
+                  <audio controls style="width:100%"
+                         {% if v in existing_voice_previews %}src="/book/{{ book.id }}/preview/{{ v }}.mp3"{% endif %}></audio>
                 </div>
               </div>
               {% endfor %}
