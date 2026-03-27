@@ -47,9 +47,15 @@
         <button class="mass-import-close" id="mass-import-close" onclick="closeMassImport()">&#10005;</button>
       </div>
       <div id="mass-import-idle" class="mass-import-idle">
-        <p>Select a folder to recursively import all supported ebook files.</p>
-        <p class="mass-import-formats">Supported: .epub .mobi .azw .azw3 .fb2 .lit .pdb .rtf .txt .docx .html .htm</p>
-        <button class="btn-primary" onclick="document.getElementById('mass-import-input').click()">Choose Folder&hellip;</button>
+        <div class="mass-import-drop-zone" onclick="document.getElementById('mass-import-input').click()">
+          <div class="mass-import-icon">&#128193;</div>
+          <p class="mass-import-heading">Select a folder to import</p>
+          <p class="mass-import-sub">All supported ebooks found recursively will be added to your library</p>
+          <div class="mass-import-format-tags">
+            <span class="mi-fmt-tag">epub</span><span class="mi-fmt-tag">mobi</span><span class="mi-fmt-tag">azw</span><span class="mi-fmt-tag">azw3</span><span class="mi-fmt-tag">fb2</span><span class="mi-fmt-tag">txt</span><span class="mi-fmt-tag">docx</span><span class="mi-fmt-tag">rtf</span><span class="mi-fmt-tag">html</span>
+          </div>
+          <button class="btn btn-primary mass-import-choose-btn" type="button">&#128193; Choose Folder&hellip;</button>
+        </div>
       </div>
       <div id="mass-import-progress" class="mass-import-progress" style="display:none">
         <div class="mass-import-summary" id="mass-import-summary">Preparing&hellip;</div>
