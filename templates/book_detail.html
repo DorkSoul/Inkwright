@@ -527,7 +527,7 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
   <div class="preview-player" id="{{ preview_id }}-player"{% if not preview_exists %} style="display:none"{% endif %}>
     <audio controls src="/book/{{ book.id }}/preview.mp3" style="width:100%"></audio>
     <p class="preview-note">~45 s sample from the same passage in the book</p>
-    <button type="button" class="btn-link preview-clear-btn" onclick="clearAllPreviews({{ book.id }})">&#128465; Clear preview</button>
+    <button type="button" class="preview-clear-btn" onclick="clearAllPreviews({{ book.id }})">&#128465; Clear preview</button>
   </div>
 
 </div>
@@ -637,7 +637,7 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
                     data-book-id="{{ book.id }}">Generate Selected</button>
             <span class="preview-status" id="compare-all-status"></span>
             <button type="button" class="btn" id="compare-clear-btn"
-                    onclick="clearAllPreviews({{ book.id }})" style="margin-left:auto">&#128465; Clear previews</button>
+                    onclick="clearAllPreviews({{ book.id }})" class="compare-clear-right">&#128465; Clear previews</button>
           </div>
 
           <div class="compare-grid" id="compare-grid">

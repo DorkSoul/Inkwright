@@ -57,7 +57,7 @@ window.LIBRARY_BOOKS = {{ books_data | tojson }};
 <div class="lib-bulk-bar" id="lib-bulk-bar">
   <span id="lib-bulk-count">0 selected</span>
   <button class="btn btn-primary" onclick="libBulkQueue()">Queue for Audio</button>
-  <button class="btn" style="border-color:var(--danger);color:var(--danger)" onclick="libBulkDelete()">Delete Selected</button>
+  <button class="btn btn-danger" onclick="libBulkDelete()">Delete Selected</button>
   <button class="btn" onclick="libClearSelection()">Cancel</button>
 </div>
 {% endblock %}

@@ -756,6 +756,8 @@ details[open] .regen-summary::before { content: '− '; }
 }
 .btn-chip:hover { background: var(--border); color: var(--text); }
 
+.compare-clear-right { margin-left: auto; }
+
 .compare-actions-row {
   display: flex;
   align-items: center;
