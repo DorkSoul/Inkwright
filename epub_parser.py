@@ -60,6 +60,10 @@ class ParsedBook:
     cover_data: Optional[bytes]
     cover_media_type: Optional[str]
     paragraphs: list = field(default_factory=list)  # list[ParsedParagraph]
+    series: Optional[str] = None
+    series_index: Optional[float] = None
+    publisher: Optional[str] = None
+    published_date: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +340,41 @@ def parse_epub(epub_path: str) -> ParsedBook:
     if creators:
         author = creators[0][0]
 
+    publisher = None
+    published_date = None
+    series = None
+    series_index = None
+
+    publishers = book.get_metadata('DC', 'publisher')
+    if publishers:
+        publisher = publishers[0][0]
+
+    dates = book.get_metadata('DC', 'date')
+    if dates:
+        published_date = dates[0][0]
+
+    for meta in book.get_metadata('OPF', 'meta'):
+        value = meta[0] if meta else None
+        attrs = meta[1] if len(meta) > 1 else {}
+        name = attrs.get('name', '')
+        prop = attrs.get('property', '')
+        if name == 'calibre:series' and attrs.get('content'):
+            series = attrs['content']
+        elif name == 'calibre:series_index' and attrs.get('content'):
+            try:
+                series_index = float(attrs['content'])
+            except (ValueError, TypeError):
+                pass
+        elif prop == 'belongs-to-collection' and value:
+            if not series:
+                series = value
+        elif prop == 'group-position' and value:
+            if series_index is None:
+                try:
+                    series_index = float(value)
+                except (ValueError, TypeError):
+                    pass
+
     cover_data, cover_media_type = _extract_cover(book)
 
     state = _WalkState()
@@ -390,6 +429,10 @@ def parse_epub(epub_path: str) -> ParsedBook:
         cover_data=cover_data,
         cover_media_type=cover_media_type,
         paragraphs=state.paragraphs,
+        series=series,
+        series_index=series_index,
+        publisher=publisher,
+        published_date=published_date,
     )
 
 

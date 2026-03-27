@@ -35,6 +35,10 @@ class Book(Base):
     tts_speed = Column(Float, nullable=False, default=1.0)
     tts_progress_pct = Column(Float, nullable=False, default=0.0)
     tts_error = Column(String, nullable=True)
+    series = Column(String, nullable=True)
+    series_index = Column(Float, nullable=True)
+    publisher = Column(String, nullable=True)
+    published_date = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -98,6 +102,10 @@ def _migrate(eng):
         "ALTER TABLE books ADD COLUMN tts_voice_blend VARCHAR",
         "ALTER TABLE books ADD COLUMN tts_blend_ratio FLOAT NOT NULL DEFAULT 0.5",
         "ALTER TABLE books ADD COLUMN tts_language VARCHAR NOT NULL DEFAULT 'a'",
+        "ALTER TABLE books ADD COLUMN series VARCHAR",
+        "ALTER TABLE books ADD COLUMN series_index FLOAT",
+        "ALTER TABLE books ADD COLUMN publisher VARCHAR",
+        "ALTER TABLE books ADD COLUMN published_date VARCHAR",
     ]
     with eng.connect() as conn:
         for stmt in migrations:

@@ -4,49 +4,477 @@
 {% block title %}Library — Inkwright{% endblock %}
 
 {% block content %}
-<div class="library-header">
-  <h1>Your Library</h1>
-  <span class="book-count">{{ books|length }} book{% if books|length != 1 %}s{% endif %}</span>
+<script>
+window.LIBRARY_BOOKS = {{ books_data | tojson }};
+</script>
+
+<div class="lib-toolbar">
+  <div class="lib-search-wrap">
+    <input id="lib-search" class="lib-search" type="search" placeholder="Search title, author or series…" autocomplete="off">
+  </div>
+  <div class="lib-controls">
+    <select id="lib-sort" class="lib-select" title="Sort">
+      <option value="date-desc">Date Added ↓</option>
+      <option value="date-asc">Date Added ↑</option>
+      <option value="title-asc">Title A → Z</option>
+      <option value="title-desc">Title Z → A</option>
+      <option value="author-asc">Author A → Z</option>
+      <option value="author-desc">Author Z → A</option>
+      <option value="series">Series</option>
+      <option value="status">Status</option>
+      <option value="duration-desc">Longest First</option>
+    </select>
+    <select id="lib-filter" class="lib-select" title="Filter">
+      <option value="all">All Books</option>
+      <option value="none">No Audio</option>
+      <option value="active">In Queue</option>
+      <option value="done">Ready</option>
+      <option value="error">Error</option>
+    </select>
+    <select id="lib-group" class="lib-select" title="Group by">
+      <option value="none">No Grouping</option>
+      <option value="author">By Author</option>
+      <option value="series">By Series</option>
+      <option value="status">By Status</option>
+    </select>
+    <div class="lib-view-btns">
+      <button id="lib-view-grid" class="lib-view-btn active" title="Grid view">&#9638;</button>
+      <button id="lib-view-list" class="lib-view-btn" title="List view">&#9776;</button>
+    </div>
+    <button id="lib-select-btn" class="lib-select-toggle">Select</button>
+  </div>
 </div>
 
-{% if books %}
-<div class="book-grid">
-  {% for book in books %}
-  <a class="book-card" href="{{ url_for('book_detail', book_id=book.id) }}">
-    <div class="book-cover">
-      {% if book.cover_image_path %}
-        <img src="{{ url_for('serve_cover', filename=book.cover_image_path) }}" alt="Cover for {{ book.title }}" loading="lazy">
-      {% else %}
-        <div class="cover-placeholder">
-          <span>{{ book.title[:2].upper() }}</span>
-        </div>
-      {% endif %}
-    </div>
-    <div class="book-info">
-      <div class="book-title">{{ book.title }}</div>
-      <div class="book-author">{{ book.author or 'Unknown' }}</div>
-      <div class="status-badge status-{{ book.tts_status.value }}">
-        {% if book.tts_status.value == 'none' %}
-          No Audio
-        {% elif book.tts_status.value == 'queued' %}
-          Queued
-        {% elif book.tts_status.value == 'processing' %}
-          Processing {{ book.tts_progress_pct | int }}%
-        {% elif book.tts_status.value == 'done' %}
-          Ready
-        {% elif book.tts_status.value == 'error' %}
-          Error
-        {% endif %}
-      </div>
-    </div>
-  </a>
-  {% endfor %}
-</div>
-{% else %}
-<div class="empty-state">
+<div class="lib-stats" id="lib-stats"></div>
+
+<div id="lib-results"></div>
+
+<div class="lib-empty" id="lib-empty" style="display:none">
   <div class="empty-icon">&#128218;</div>
-  <p>No books yet. Upload an EPUB to get started.</p>
-  <label class="btn btn-primary" for="upload-input">Upload EPUB</label>
+  <p>No books match your search.</p>
 </div>
-{% endif %}
+
+<div class="lib-bulk-bar" id="lib-bulk-bar">
+  <span id="lib-bulk-count">0 selected</span>
+  <button class="btn btn-primary" onclick="libBulkQueue()">Queue for Audio</button>
+  <button class="btn" style="border-color:var(--danger);color:var(--danger)" onclick="libBulkDelete()">Delete Selected</button>
+  <button class="btn" onclick="libClearSelection()">Cancel</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+var libState = {
+  books: window.LIBRARY_BOOKS || [],
+  search: '',
+  sort: 'date-desc',
+  filter: 'all',
+  group: 'none',
+  view: 'grid',
+  selectMode: false,
+  selected: {},   // id → true
+};
+
+// ---------------------------------------------------------------------------
+// Prefs persistence
+// ---------------------------------------------------------------------------
+function libSavePrefs() {
+  try {
+    localStorage.setItem('inkwright_lib', JSON.stringify({
+      sort: libState.sort, filter: libState.filter,
+      group: libState.group, view: libState.view,
+    }));
+  } catch(e) {}
+}
+function libLoadPrefs() {
+  try {
+    var p = JSON.parse(localStorage.getItem('inkwright_lib') || '{}');
+    if (p.sort)   libState.sort   = p.sort;
+    if (p.filter) libState.filter = p.filter;
+    if (p.group)  libState.group  = p.group;
+    if (p.view)   libState.view   = p.view;
+  } catch(e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+function formatDuration(secs) {
+  if (!secs) return '';
+  var h = Math.floor(secs / 3600);
+  var m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+}
+function formatDate(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'});
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function statusLabel(s) {
+  return {none:'No Audio', queued:'Queued', processing:'Processing', done:'Ready', error:'Error'}[s] || s;
+}
+
+// ---------------------------------------------------------------------------
+// Filter + Sort
+// ---------------------------------------------------------------------------
+function libSortKey(b, sort) {
+  switch(sort) {
+    case 'title-asc': case 'title-desc': return b.title.toLowerCase();
+    case 'author-asc': case 'author-desc': return (b.author || 'zzz').toLowerCase();
+    case 'series':
+      var s = b.series ? b.series.toLowerCase() : '\uffff';
+      var si = b.series_index != null ? String(b.series_index).padStart(8,'0') : '';
+      return s + '|' + si;
+    case 'date-asc': case 'date-desc': return b.date_added || '';
+    case 'status': return {'done':0,'processing':1,'queued':2,'none':3,'error':4}[b.status] || 3;
+    case 'duration-desc': return -(b.duration_seconds || 0);
+  }
+  return '';
+}
+function libDescending(sort) {
+  return sort === 'title-desc' || sort === 'author-desc' || sort === 'date-desc' || sort === 'status' || sort === 'duration-desc';
+}
+
+function libApplyFilter() {
+  var q = libState.search.toLowerCase();
+  var f = libState.filter;
+  return libState.books.filter(function(b) {
+    if (f === 'none'   && b.status !== 'none') return false;
+    if (f === 'active' && b.status !== 'queued' && b.status !== 'processing') return false;
+    if (f === 'done'   && b.status !== 'done') return false;
+    if (f === 'error'  && b.status !== 'error') return false;
+    if (q) {
+      var hay = (b.title + ' ' + (b.author||'') + ' ' + (b.series||'')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }).sort(function(a, b) {
+    var ka = libSortKey(a, libState.sort), kb = libSortKey(b, libState.sort);
+    var cmp = ka < kb ? -1 : ka > kb ? 1 : 0;
+    return libDescending(libState.sort) ? -cmp : cmp;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Grouping
+// ---------------------------------------------------------------------------
+function libGroupBooks(books) {
+  if (libState.group === 'none') return [{key: null, books: books}];
+  var groups = {};
+  books.forEach(function(b) {
+    var key;
+    if (libState.group === 'author') key = b.author || 'Unknown Author';
+    else if (libState.group === 'series') key = b.series || '\u2014 No Series';
+    else if (libState.group === 'status') key = statusLabel(b.status);
+    groups[key] = groups[key] || [];
+    groups[key].push(b);
+  });
+  return Object.keys(groups).sort().map(function(k) { return {key:k, books:groups[k]}; });
+}
+
+// ---------------------------------------------------------------------------
+// Card / Row HTML builders
+// ---------------------------------------------------------------------------
+function libSeriesStr(b) {
+  if (!b.series) return '';
+  return b.series + (b.series_index != null ? ' #' + b.series_index : '');
+}
+
+function libCoverHtml(b, size) {
+  if (b.cover_url) {
+    return '<img src="' + escHtml(b.cover_url) + '" alt="" loading="lazy">';
+  }
+  var initials = (b.title || '?').slice(0,2).toUpperCase();
+  return '<div class="cover-placeholder' + (size === 'large' ? ' cover-placeholder--large' : '') + '"><span>' + escHtml(initials) + '</span></div>';
+}
+
+function libBadgeHtml(b) {
+  var label = statusLabel(b.status);
+  var html = '<span class="status-badge status-' + b.status + '">' + escHtml(label) + '</span>';
+  if (b.status === 'done' && b.duration_seconds) {
+    html += '<span class="book-duration">' + escHtml(formatDuration(b.duration_seconds)) + '</span>';
+  }
+  return html;
+}
+
+function libMakeCard(b) {
+  var sel = libState.selected[b.id] ? ' selected' : '';
+  var series = libSeriesStr(b);
+  var progress = b.status === 'processing' ? '<div class="card-progress"><div class="card-progress-fill" style="width:' + (b.progress_pct||0) + '%"></div></div>' : '';
+
+  // Duration badge on cover
+  var coverBadge = '';
+  if (b.status === 'done' && b.duration_seconds) {
+    coverBadge = '<span class="cover-duration-badge">' + escHtml(formatDuration(b.duration_seconds)) + '</span>';
+  }
+  if (b.status === 'processing') {
+    coverBadge = '<span class="cover-duration-badge processing-badge">' + Math.round(b.progress_pct||0) + '%</span>';
+  }
+
+  var playBtn = b.play_url ? '<a href="' + escHtml(b.play_url) + '" class="card-action-btn" title="Play" onclick="event.stopPropagation()">&#9654;</a>' : '';
+  var checkHtml = libState.selectMode ? '<div class="card-check">' + (libState.selected[b.id] ? '&#10003;' : '') + '</div>' : '';
+
+  return '<div class="book-card' + sel + '" data-id="' + b.id + '">' +
+    checkHtml +
+    '<a class="card-link" href="' + escHtml(b.detail_url) + '" tabindex="-1" aria-hidden="true"></a>' +
+    '<div class="book-cover">' + libCoverHtml(b) + coverBadge + '</div>' +
+    '<div class="book-info">' +
+      '<div class="book-title">' + escHtml(b.title) + '</div>' +
+      '<div class="book-author">' + escHtml(b.author) + '</div>' +
+      (series ? '<div class="book-series">' + escHtml(series) + '</div>' : '') +
+      progress +
+      '<div class="book-badges">' + libBadgeHtml(b) + '</div>' +
+    '</div>' +
+    '<div class="card-actions">' +
+      playBtn +
+      '<button class="card-action-btn" title="Delete" onclick="libDeleteBook(' + b.id + ',event)">&#128465;</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function libMakeRow(b) {
+  var sel = libState.selected[b.id] ? ' selected' : '';
+  var series = libSeriesStr(b);
+  var checkHtml = '<div class="row-check' + (libState.selectMode ? ' visible' : '') + '">' +
+    '<span class="row-check-box">' + (libState.selected[b.id] ? '&#10003;' : '') + '</span></div>';
+
+  return '<div class="book-row' + sel + '" data-id="' + b.id + '">' +
+    checkHtml +
+    '<div class="row-cover">' + libCoverHtml(b) + '</div>' +
+    '<div class="row-main">' +
+      '<a class="row-title" href="' + escHtml(b.detail_url) + '">' + escHtml(b.title) + '</a>' +
+      '<div class="row-meta">' + escHtml(b.author) + (series ? ' &middot; ' + escHtml(series) : '') + '</div>' +
+    '</div>' +
+    '<div class="row-status">' + libBadgeHtml(b) + '</div>' +
+    '<div class="row-date">' + escHtml(formatDate(b.date_added)) + '</div>' +
+    '<div class="row-actions">' +
+      (b.play_url ? '<a href="' + escHtml(b.play_url) + '" class="btn-icon" title="Play">&#9654;</a>' : '') +
+      '<a href="' + escHtml(b.detail_url) + '" class="btn-icon" title="Edit">&#9998;</a>' +
+      '<button class="btn-icon" title="Delete" onclick="libDeleteBook(' + b.id + ',event)">&#128465;</button>' +
+    '</div>' +
+  '</div>';
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+function libRender() {
+  var filtered = libApplyFilter();
+  var grouped  = libGroupBooks(filtered);
+  var results  = document.getElementById('lib-results');
+  var empty    = document.getElementById('lib-empty');
+  var isGrid   = libState.view === 'grid';
+
+  // Stats
+  var total = libState.books.length;
+  var ready = libState.books.filter(function(b){return b.status==='done';}).length;
+  var active = libState.books.filter(function(b){return b.status==='queued'||b.status==='processing';}).length;
+  var stats = document.getElementById('lib-stats');
+  stats.textContent = total + ' book' + (total!==1?'s':'') +
+    (ready  ? ' \u00B7 ' + ready + ' ready' : '') +
+    (active ? ' \u00B7 ' + active + ' in queue' : '');
+  if (filtered.length < total && libState.search) {
+    stats.textContent += ' \u00B7 showing ' + filtered.length;
+  }
+
+  if (!filtered.length) {
+    results.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  var html = '';
+  grouped.forEach(function(grp) {
+    if (grp.key) {
+      html += '<div class="lib-group-header"><span class="group-title">' + escHtml(grp.key) + '</span>' +
+        '<span class="group-count">' + grp.books.length + '</span></div>';
+    }
+    if (isGrid) {
+      html += '<div class="book-grid">';
+      grp.books.forEach(function(b) { html += libMakeCard(b); });
+      html += '</div>';
+    } else {
+      html += '<div class="book-list">';
+      grp.books.forEach(function(b) { html += libMakeRow(b); });
+      html += '</div>';
+    }
+  });
+  results.innerHTML = html;
+
+  // Attach click events
+  results.querySelectorAll('[data-id]').forEach(function(el) {
+    el.addEventListener('click', function(e) {
+      var id = parseInt(el.dataset.id);
+      if (libState.selectMode) {
+        e.preventDefault();
+        libToggleSelect(id);
+      }
+    });
+  });
+
+  // View toggle button state
+  document.getElementById('lib-view-grid').classList.toggle('active', isGrid);
+  document.getElementById('lib-view-list').classList.toggle('active', !isGrid);
+
+  libUpdateBulkBar();
+}
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+function libToggleSelect(id) {
+  if (libState.selected[id]) delete libState.selected[id];
+  else libState.selected[id] = true;
+  libRender();
+}
+function libClearSelection() {
+  libState.selected = {};
+  libState.selectMode = false;
+  document.getElementById('lib-select-btn').classList.remove('active');
+  libRender();
+}
+function libUpdateBulkBar() {
+  var count = Object.keys(libState.selected).length;
+  var bar = document.getElementById('lib-bulk-bar');
+  if (count > 0) {
+    bar.classList.add('visible');
+    document.getElementById('lib-bulk-count').textContent = count + ' selected';
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk actions
+// ---------------------------------------------------------------------------
+function libBulkQueue() {
+  var ids = Object.keys(libState.selected).map(Number);
+  if (!ids.length) return;
+  fetch('/books/bulk-queue', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ids: ids}),
+  }).then(function(r) { return r.json(); })
+    .then(function(data) {
+      data.queued.forEach(function(id) {
+        var b = libState.books.find(function(b){return b.id===id;});
+        if (b) b.status = 'queued';
+      });
+      libClearSelection();
+    });
+}
+
+function libBulkDelete() {
+  var ids = Object.keys(libState.selected).map(Number);
+  if (!ids.length) return;
+  if (!confirm('Delete ' + ids.length + ' book' + (ids.length!==1?'s':'') + '? This cannot be undone.')) return;
+  fetch('/books/bulk-delete', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ids: ids}),
+  }).then(function(r) { return r.json(); })
+    .then(function(data) {
+      var deleted = new Set(data.deleted.map(Number));
+      libState.books = libState.books.filter(function(b){return !deleted.has(b.id);});
+      libClearSelection();
+    });
+}
+
+function libDeleteBook(id, e) {
+  e.stopPropagation();
+  var b = libState.books.find(function(x){return x.id===id;});
+  if (!b) return;
+  if (!confirm('Delete "' + b.title + '"? This cannot be undone.')) return;
+  fetch('/book/' + id, {method:'DELETE'})
+    .then(function(r) { return r.json(); })
+    .then(function() {
+      libState.books = libState.books.filter(function(x){return x.id!==id;});
+      libRender();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Status polling (for active books)
+// ---------------------------------------------------------------------------
+function libStartPolling() {
+  setInterval(function() {
+    var active = libState.books.filter(function(b){
+      return b.status === 'queued' || b.status === 'processing';
+    });
+    if (!active.length) return;
+    fetch('/books/status')
+      .then(function(r){ return r.json(); })
+      .then(function(data) {
+        var changed = false;
+        libState.books.forEach(function(b) {
+          var u = data[String(b.id)];
+          if (!u) {
+            // Was active, now missing from response → finished
+            if (b.status === 'processing' || b.status === 'queued') {
+              // Reload to get done/error status + duration
+              window.location.reload();
+            }
+            return;
+          }
+          if (u.status !== b.status || Math.abs((u.progress_pct||0) - (b.progress_pct||0)) > 0.5) {
+            b.status = u.status;
+            b.progress_pct = u.progress_pct;
+            changed = true;
+          }
+        });
+        if (changed) libRender();
+      })
+      .catch(function(){});
+  }, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar event handlers
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', function() {
+  libLoadPrefs();
+
+  // Apply prefs to controls
+  document.getElementById('lib-sort').value   = libState.sort;
+  document.getElementById('lib-filter').value = libState.filter;
+  document.getElementById('lib-group').value  = libState.group;
+
+  document.getElementById('lib-search').addEventListener('input', function() {
+    libState.search = this.value;
+    libRender();
+  });
+  document.getElementById('lib-sort').addEventListener('change', function() {
+    libState.sort = this.value; libSavePrefs(); libRender();
+  });
+  document.getElementById('lib-filter').addEventListener('change', function() {
+    libState.filter = this.value; libSavePrefs(); libRender();
+  });
+  document.getElementById('lib-group').addEventListener('change', function() {
+    libState.group = this.value; libSavePrefs(); libRender();
+  });
+  document.getElementById('lib-view-grid').addEventListener('click', function() {
+    libState.view = 'grid'; libSavePrefs(); libRender();
+  });
+  document.getElementById('lib-view-list').addEventListener('click', function() {
+    libState.view = 'list'; libSavePrefs(); libRender();
+  });
+  document.getElementById('lib-select-btn').addEventListener('click', function() {
+    libState.selectMode = !libState.selectMode;
+    this.classList.toggle('active', libState.selectMode);
+    if (!libState.selectMode) { libState.selected = {}; }
+    libRender();
+  });
+
+  libRender();
+  libStartPolling();
+});
+</script>
 {% endblock %}

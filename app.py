@@ -121,8 +121,27 @@ def _epub_metadata(epub_path: str) -> tuple[str, str]:
 def library():
     session = get_session()
     try:
-        books = session.query(Book).order_by(Book.created_at.desc()).all()
-        return render_template('library.html', books=books)
+        books = session.query(Book).all()
+        books_data = []
+        for book in books:
+            ai = book.audio_index
+            books_data.append({
+                'id': book.id,
+                'title': book.title or 'Unknown Title',
+                'author': book.author or 'Unknown Author',
+                'series': book.series,
+                'series_index': book.series_index,
+                'publisher': book.publisher,
+                'published_date': book.published_date,
+                'status': book.tts_status.value if book.tts_status else 'none',
+                'progress_pct': book.tts_progress_pct or 0,
+                'cover_url': url_for('serve_cover', filename=book.cover_image_path) if book.cover_image_path else None,
+                'detail_url': url_for('book_detail', book_id=book.id),
+                'play_url': url_for('play_book', book_id=book.id) if book.tts_status == TTSStatus.done else None,
+                'duration_seconds': ai.duration_seconds if ai else None,
+                'date_added': book.created_at.isoformat() if book.created_at else None,
+            })
+        return render_template('library.html', books_data=books_data)
     finally:
         session.close()
 
@@ -174,14 +193,34 @@ def upload_book():
         finally:
             os.unlink(tmp_path)
 
-    # Extract metadata
-    title, author = _epub_metadata(dest_path)
+    # Parse EPUB once — get metadata + cover
+    parsed_book = None
+    title = 'Unknown Title'
+    author = 'Unknown Author'
+    series = None
+    series_index = None
+    publisher = None
+    published_date = None
+    try:
+        parsed_book = parse_epub(dest_path)
+        title = parsed_book.title
+        author = parsed_book.author
+        series = parsed_book.series
+        series_index = parsed_book.series_index
+        publisher = parsed_book.publisher
+        published_date = parsed_book.published_date
+    except Exception as e:
+        logger.warning("Could not parse EPUB metadata: %s", e)
 
     session = get_session()
     try:
         book = Book(
             title=title,
             author=author,
+            series=series,
+            series_index=series_index,
+            publisher=publisher,
+            published_date=published_date,
             epub_filename=safe_name,
             tts_status=TTSStatus.none,
             tts_voice='af_heart',
@@ -192,13 +231,14 @@ def upload_book():
         session.add(book)
         session.commit()
 
-        # Try to extract and save cover immediately (saved to SSD covers dir)
+        # Save cover
         try:
-            from epub_parser import parse_epub as _pe, save_cover as _sc
-            parsed = _pe(dest_path)
-            if parsed.cover_data:
-                cover_fn = _sc(parsed.cover_data, parsed.cover_media_type or 'image/jpeg',
-                               COVERS_DIR, book.id)
+            if parsed_book and parsed_book.cover_data:
+                cover_fn = save_cover(
+                    parsed_book.cover_data,
+                    parsed_book.cover_media_type or 'image/jpeg',
+                    COVERS_DIR, book.id,
+                )
                 if cover_fn:
                     book.cover_image_path = cover_fn
                     session.commit()
@@ -441,6 +481,77 @@ def delete_audio(book_id):
         session.close()
 
     return jsonify({'deleted': True})
+
+
+# ---------------------------------------------------------------------------
+# Routes — Bulk operations
+# ---------------------------------------------------------------------------
+
+@app.route('/books/bulk-queue', methods=['POST'])
+def bulk_queue():
+    """Queue multiple books (by id list) using their existing TTS settings."""
+    ids = (request.json or {}).get('ids', [])
+    queued = []
+    session = get_session()
+    try:
+        for book_id in ids:
+            book = session.get(Book, int(book_id))
+            if book and book.tts_status in (TTSStatus.none, TTSStatus.error):
+                book.tts_status = TTSStatus.queued
+                book.tts_progress_pct = 0.0
+                book.tts_error = None
+                book.updated_at = datetime.utcnow()
+                queued.append(book_id)
+        session.commit()
+    finally:
+        session.close()
+    return jsonify({'queued': queued})
+
+
+@app.route('/books/bulk-delete', methods=['POST'])
+def bulk_delete():
+    """Delete multiple books by id list."""
+    ids = (request.json or {}).get('ids', [])
+    deleted = []
+    session = get_session()
+    try:
+        for book_id in ids:
+            book = session.get(Book, int(book_id))
+            if not book:
+                continue
+            for path in [
+                os.path.join(BOOKS_DIR, book.epub_filename),
+                os.path.join(COVERS_DIR, book.cover_image_path) if book.cover_image_path else None,
+                os.path.join(AUDIOBOOKS_DIR, f"{book_id}.mp3"),
+                os.path.join(AUDIOBOOKS_DIR, f"{book_id}.json"),
+            ]:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            session.delete(book)
+            deleted.append(book_id)
+        session.commit()
+    finally:
+        session.close()
+    return jsonify({'deleted': deleted})
+
+
+@app.route('/books/status')
+def books_status():
+    """Return status for all actively queued/processing books (for library polling)."""
+    session = get_session()
+    try:
+        active = session.query(Book).filter(
+            Book.tts_status.in_([TTSStatus.queued, TTSStatus.processing])
+        ).all()
+        return jsonify({
+            str(b.id): {
+                'status': b.tts_status.value,
+                'progress_pct': b.tts_progress_pct or 0,
+            }
+            for b in active
+        })
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
