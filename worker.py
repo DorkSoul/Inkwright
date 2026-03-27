@@ -68,6 +68,7 @@ def _build_index(book_id: int, title: str, author: str,
 
 
 def _process_book(book_id: int):
+    mp3_path = None
     session = get_session()
     try:
         book = session.get(Book, book_id)
@@ -114,49 +115,50 @@ def _process_book(book_id: int):
                            lang_code=lang_code)
         engine.load()
 
-        audio_chunks      = []
+        audio_chunks        = []
         source_para_entries = []
-        word_entries      = []
-        current_time      = 0.0
+        word_entries        = []
+        current_time        = 0.0
 
-        for i, para in enumerate(paragraphs):
-            para_audio, para_words = engine.synthesise_with_words(para.text)
-            para_duration = len(para_audio) / SAMPLE_RATE
+        try:
+            for i, para in enumerate(paragraphs):
+                para_audio, para_words = engine.synthesise_with_words(para.text)
+                para_duration = len(para_audio) / SAMPLE_RATE
 
-            source_para_entries.append({
-                'paragraph_index': para.paragraph_index,
-                'chapter_index':   para.chapter_index,
-                'chapter_title':   para.chapter_title,
-                'text':            para.text,
-                'start_time':      current_time,
-                'end_time':        current_time + para_duration,
-            })
-
-            for w in para_words:
-                word_entries.append({
+                source_para_entries.append({
                     'paragraph_index': para.paragraph_index,
-                    'char_start':  w['char_start'],
-                    'char_end':    w['char_end'],
-                    'start_time':  current_time + w['start_time'],
-                    'end_time':    current_time + w['end_time'],
+                    'chapter_index':   para.chapter_index,
+                    'chapter_title':   para.chapter_title,
+                    'text':            para.text,
+                    'start_time':      current_time,
+                    'end_time':        current_time + para_duration,
                 })
 
-            audio_chunks.append(para_audio)
-            current_time += para_duration
+                for w in para_words:
+                    word_entries.append({
+                        'paragraph_index': para.paragraph_index,
+                        'char_start':  w['char_start'],
+                        'char_end':    w['char_end'],
+                        'start_time':  current_time + w['start_time'],
+                        'end_time':    current_time + w['end_time'],
+                    })
 
-            pct = round((i + 1) / total * 100, 1)
-            if (i + 1) % 10 == 0 or (i + 1) == total:
-                session.query(Book).filter(Book.id == book_id).update(
-                    {'tts_progress_pct': pct, 'updated_at': datetime.utcnow()}
-                )
-                session.commit()
-                logger.debug("Book %d: %d/%d paragraphs (%.1f%%)", book_id, i + 1, total, pct)
+                audio_chunks.append(para_audio)
+                current_time += para_duration
 
-        engine.close()
+                pct = round((i + 1) / total * 100, 1)
+                if (i + 1) % 10 == 0 or (i + 1) == total:
+                    session.query(Book).filter(Book.id == book_id).update(
+                        {'tts_progress_pct': pct, 'updated_at': datetime.utcnow()}
+                    )
+                    session.commit()
+                    logger.debug("Book %d: %d/%d paragraphs (%.1f%%)", book_id, i + 1, total, pct)
+        finally:
+            engine.close()
 
         # --- Audio export ---
         mp3_filename = f"{book_id}.mp3"
-        mp3_path = os.path.join(AUDIOBOOKS_DIR, mp3_filename)
+        mp3_path     = os.path.join(AUDIOBOOKS_DIR, mp3_filename)
         total_duration = audio_to_mp3(audio_chunks, mp3_path)
 
         # --- JSON index ---
@@ -198,6 +200,12 @@ def _process_book(book_id: int):
     except Exception as e:
         tb = traceback.format_exc()
         logger.error("Book %d failed: %s\n%s", book_id, e, tb)
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+                logger.info("Removed partial mp3 for book %d: %s", book_id, mp3_path)
+            except OSError as rm_err:
+                logger.warning("Could not remove partial mp3 %s: %s", mp3_path, rm_err)
         try:
             session.query(Book).filter(Book.id == book_id).update({
                 'tts_status': TTSStatus.error,

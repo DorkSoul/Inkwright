@@ -15,6 +15,7 @@ from flask import (
 
 import models
 from models import AudioIndex, Book, TTSStatus, db_init, get_session
+from sqlalchemy.orm import joinedload
 from epub_parser import parse_epub, save_cover
 import worker
 
@@ -121,7 +122,7 @@ def _epub_metadata(epub_path: str) -> tuple[str, str]:
 def library():
     session = get_session()
     try:
-        books = session.query(Book).all()
+        books = session.query(Book).options(joinedload(Book.audio_index)).all()
         books_data = []
         for book in books:
             ai = book.audio_index
@@ -419,9 +420,12 @@ def serve_index(book_id):
 
 @app.route('/cover/<path:filename>')
 def serve_cover(filename):
-    # Only allow files directly in COVERS_DIR (no path traversal)
+    # Restrict to files directly in COVERS_DIR — no path traversal or symlink escapes
     safe = os.path.basename(filename)
     path = os.path.join(COVERS_DIR, safe)
+    covers_real = os.path.realpath(COVERS_DIR) + os.sep
+    if not os.path.realpath(path).startswith(covers_real):
+        abort(404)
     if not os.path.exists(path):
         abort(404)
     mime, _ = mimetypes.guess_type(path)
@@ -506,7 +510,11 @@ def bulk_queue():
     session = get_session()
     try:
         for book_id in ids:
-            book = session.get(Book, int(book_id))
+            try:
+                book_id = int(book_id)
+            except (TypeError, ValueError):
+                continue
+            book = session.get(Book, book_id)
             if book and book.tts_status in (TTSStatus.none, TTSStatus.error):
                 book.tts_status = TTSStatus.queued
                 book.tts_progress_pct = 0.0
@@ -527,7 +535,11 @@ def bulk_delete():
     session = get_session()
     try:
         for book_id in ids:
-            book = session.get(Book, int(book_id))
+            try:
+                book_id = int(book_id)
+            except (TypeError, ValueError):
+                continue
+            book = session.get(Book, book_id)
             if not book:
                 continue
             for path in [
@@ -575,7 +587,7 @@ def _load_favourites() -> list:
             return json.load(f).get('voices', [])
     except FileNotFoundError:
         return []
-    except Exception:
+    except (json.JSONDecodeError, ValueError, KeyError):
         return []
 
 
@@ -610,6 +622,7 @@ def _run_preview(book_id: int, epub_path: str, voice: str, speed: float,
                  output_path: str, voice_blend: str = None, blend_ratio: float = 0.5,
                  lang_code: str = None):
     """Background thread: synthesise a short sample and write it to output_path."""
+    engine = None
     try:
         from tts_engine import TTSEngine
         from audio_utils import audio_to_mp3
@@ -624,6 +637,7 @@ def _run_preview(book_id: int, epub_path: str, voice: str, speed: float,
         engine.load()
         chunks = [engine.synthesise(t) for t in texts]
         engine.close()
+        engine = None
 
         audio_to_mp3(chunks, output_path)
 
@@ -634,6 +648,11 @@ def _run_preview(book_id: int, epub_path: str, voice: str, speed: float,
 
     except Exception as e:
         logger.error("Preview failed for book %d: %s", book_id, e)
+        if engine is not None:
+            try:
+                engine.close()
+            except Exception:
+                pass
         with _preview_lock:
             if book_id in _preview_jobs:
                 _preview_jobs[book_id]['status'] = 'error'

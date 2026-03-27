@@ -156,15 +156,8 @@ function initVp(vp) {
         o.classList.toggle('vp-option--active', o.dataset.value === val);
       });
       panel.hidden = true;
-      // Sync blend picker's active state if this is the primary picker
-      syncBlendExclusion(vp, val);
     }
   });
-}
-
-function syncBlendExclusion(primaryVp, selectedVoice) {
-  // Optionally mark the same voice as "active" in sibling blend pickers
-  // (no hard exclusion — blending a voice with itself just yields that voice)
 }
 
 function toggleFavourite(voice) {
