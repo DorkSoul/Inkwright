@@ -18,6 +18,19 @@ jobs:
       packages: write
 
     steps:
+      - name: Free disk space
+        run: |
+          # GitHub runners come with ~14 GB free; large ML model downloads need more.
+          # Remove bundled software that we don't need for a Docker build.
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          docker system prune -af --volumes || true
+          df -h
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
