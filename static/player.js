@@ -247,6 +247,7 @@ function onPlayPause() {
 // Seek bar
 // ---------------------------------------------------------------------------
 function onSeekStart() { isSeeking = true; }
+
 function onSeekInput() {
   var d = audio.duration || (index && index.duration_seconds) || 0;
   timeCurrent.textContent = formatTime((seekBar.value / 1000) * d);
@@ -254,7 +255,14 @@ function onSeekInput() {
 function onSeekEnd() {
   var d = audio.duration || (index && index.duration_seconds) || 0;
   audio.currentTime = (seekBar.value / 1000) * d;
+  // isSeeking cleared in the 'seeked' event once the browser has actually landed
+}
+
+function onSeeked() {
   isSeeking = false;
+  // Snap highlight immediately to the new position
+  var wIdx = findActiveWord(audio.currentTime);
+  if (wIdx !== currentWordIdx) updateWordHighlight(wIdx);
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +306,8 @@ document.addEventListener('DOMContentLoaded', function() {
   sidebarClose   = document.getElementById('sidebar-close');
 
   audio.addEventListener('durationchange', onAudioDurationChange);
-  audio.addEventListener('ended', onAudioEnded);
+  audio.addEventListener('ended',         onAudioEnded);
+  audio.addEventListener('seeked',        onSeeked);
   audio.addEventListener('play',  function() { btnPlay.innerHTML = '&#9646;&#9646;'; });
   audio.addEventListener('pause', function() { btnPlay.textContent = '\u25B6'; });
 

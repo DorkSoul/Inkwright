@@ -35,7 +35,7 @@ def wav_to_mp3(wav_path: str, mp3_path: str) -> None:
         'ffmpeg', '-y',
         '-i', wav_path,
         '-codec:a', 'libmp3lame',
-        '-q:a', '2',
+        '-b:a', '64k',   # CBR — byte offset maps exactly to time, enabling accurate seeking
         mp3_path,
     ]
     logger.info("Converting WAV → MP3: %s", mp3_path)
