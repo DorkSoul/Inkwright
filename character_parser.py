@@ -1,7 +1,7 @@
 """
 character_parser.py — LLM-based paragraph speaker attribution.
 
-Reads LLM_PROVIDER env var: 'ollama_7b' | 'ollama_9b' | 'ollama_14b' | 'claude'
+Reads LLM_PROVIDER env var: 'ollama_7b' | 'ollama_14b' | 'claude'
 Reads OLLAMA_HOST env var: default 'http://ollama:11434'
 Reads CLAUDE_API_KEY env var for Claude mode.
 """
@@ -18,7 +18,6 @@ OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://ollama:11434')
 
 OLLAMA_MODELS = {
     'ollama_7b':  'qwen2.5:7b',
-    'ollama_9b':  'gemma3:9b',
     'ollama_14b': 'qwen2.5:14b',
 }
 

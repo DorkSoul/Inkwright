@@ -16,7 +16,7 @@ services:
       - CONFIG_DIR=/config
       - PORT=8084
       - OLLAMA_HOST=http://ollama:11434
-      - LLM_PROVIDER=ollama_9b
+      - LLM_PROVIDER=ollama_7b
       # - LLM_PROVIDER=claude
       # - CLAUDE_API_KEY=sk-ant-...
       # - SECRET_KEY=change-me

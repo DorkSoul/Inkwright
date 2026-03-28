@@ -824,7 +824,6 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
             <label for="cast-provider">Analyse with</label>
             <select id="cast-provider" class="voice-select">
               <option value="ollama_7b" {% if not claude_configured %}selected{% endif %}>Local — Fast (7B, ~4.5 GB download)</option>
-              <option value="ollama_9b">Local — Balanced (9B, ~6 GB download)</option>
               <option value="ollama_14b">Local — Accurate (14B, ~8 GB download)</option>
               <option value="claude" {% if claude_configured %}selected{% endif %}>Claude API (best quality, requires API key)</option>
             </select>
