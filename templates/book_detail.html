@@ -156,6 +156,13 @@ function initVp(vp) {
         o.classList.toggle('vp-option--active', o.dataset.value === val);
       });
       panel.hidden = true;
+      // Keep blend ratio bar labels in sync
+      var ctrl = vp.closest('.tts-controls');
+      if (ctrl) {
+        var labels = ctrl.querySelectorAll('.blend-end-label');
+        if (vp.classList.contains('vp-primary') && labels[0]) labels[0].textContent = lbl;
+        if (vp.classList.contains('vp-blend')   && labels[1]) labels[1].textContent = lbl;
+      }
     }
   });
 }
