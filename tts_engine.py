@@ -150,30 +150,14 @@ class TTSEngine:
         self.lang_code = lang_code or lang_code_for_voice(self.voice)
         self._pipeline = None
 
-    @staticmethod
-    def _select_device() -> str:
-        """Return 'cuda', 'mps', or 'cpu' — whichever is available."""
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return 'cuda'
-            if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available():
-                return 'mps'
-        except Exception:
-            pass
-        return 'cpu'
-
     def load(self):
         if self._pipeline is not None:
             return
         from kokoro import KPipeline
-        device = self._select_device()
-        self._pipeline = KPipeline(lang_code=self.lang_code, repo_id=REPO_ID, device=device)
-        logger.info(
-            "Kokoro pipeline loaded (device=%s lang=%s voice=%s speed=%.2f blend=%s@%.0f%%)",
-            device, self.lang_code, self.voice, self.speed,
-            self.voice_blend or 'none', self.blend_ratio * 100,
-        )
+        self._pipeline = KPipeline(lang_code=self.lang_code, repo_id=REPO_ID)
+        logger.info("Kokoro pipeline loaded (lang=%s voice=%s speed=%.2f blend=%s@%.0f%%)",
+                    self.lang_code, self.voice, self.speed,
+                    self.voice_blend or 'none', self.blend_ratio * 100)
 
     def _voice_tensor(self):
         """Return the voice style tensor, blended if a second voice is configured."""

@@ -11,17 +11,7 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# ---------------------------------------------------------------------------
-# PyTorch — install CUDA 12.1 wheels first so Kokoro runs on GPU when
-# available.  Falls back to the default CPU-only wheels from PyPI if the
-# CUDA index is unreachable (e.g. air-gapped builds).
-# ---------------------------------------------------------------------------
-RUN pip install --no-cache-dir \
-        torch \
-        --index-url https://download.pytorch.org/whl/cu121 \
-    || pip install --no-cache-dir torch
-
-# Install remaining Python dependencies (kokoro will reuse the torch already installed)
+# Install Python dependencies first for layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

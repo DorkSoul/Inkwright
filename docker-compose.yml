@@ -14,16 +14,4 @@ services:
       - CONFIG_DIR=/config
       - PORT=8084
       # - SECRET_KEY=change-me         # Optional: set a stable secret key
-    # ---------------------------------------------------------------------------
-    # GPU acceleration (optional — remove this block if you have no NVIDIA GPU)
-    # Requires: NVIDIA driver + nvidia-container-toolkit on the host.
-    # Install toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-    # ---------------------------------------------------------------------------
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     restart: unless-stopped
