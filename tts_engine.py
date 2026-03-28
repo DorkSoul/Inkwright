@@ -159,11 +159,17 @@ class TTSEngine:
                     self.lang_code, self.voice, self.speed,
                     self.voice_blend or 'none', self.blend_ratio * 100)
 
-    def _voice_tensor(self):
-        """Return the voice style tensor, blended if a second voice is configured."""
+    def _voice_tensor(self, voice_override: str = None):
+        """Return the voice style tensor.
+
+        If voice_override is provided and valid, use it directly without blending.
+        Otherwise use self.voice with optional blending.
+        """
         import torch
-        pack_a = self._pipeline.load_voice(self.voice)
-        if self.voice_blend and 0.0 < self.blend_ratio <= 1.0:
+        voice_id = voice_override if (voice_override and voice_override in VOICE_LABELS) else self.voice
+        pack_a = self._pipeline.load_voice(voice_id)
+        # Only blend if NOT using an override voice
+        if not voice_override and self.voice_blend and 0.0 < self.blend_ratio <= 1.0:
             pack_b = self._pipeline.load_voice(self.voice_blend)
             r = self.blend_ratio
             return (1.0 - r) * pack_a + r * pack_b
@@ -178,7 +184,7 @@ class TTSEngine:
             return audio.detach().cpu().numpy().astype(np.float32)
         return np.asarray(audio, dtype=np.float32)
 
-    def synthesise_with_words(self, text: str) -> tuple[np.ndarray, list]:
+    def synthesise_with_words(self, text: str, voice_override: str = None) -> tuple[np.ndarray, list]:
         """
         Synthesise text and return (audio_array, word_entries).
 
@@ -189,11 +195,14 @@ class TTSEngine:
         Kokoro handles its own chunking internally; we just iterate results
         and accumulate audio + word timestamps.  If token timestamps are not
         available (some non-English languages) the entry spans the whole chunk.
+
+        voice_override: if provided and valid, use this voice instead of self.voice
+                        (disables blending for this call).
         """
         if self._pipeline is None:
             self.load()
 
-        voice_tensor = self._voice_tensor()
+        voice_tensor = self._voice_tensor(voice_override=voice_override)
         all_audio: list[np.ndarray] = []
         word_entries: list[dict] = []
         current_time = 0.0
@@ -252,9 +261,9 @@ class TTSEngine:
 
         return np.concatenate(all_audio), word_entries
 
-    def synthesise(self, text: str) -> np.ndarray:
+    def synthesise(self, text: str, voice_override: str = None) -> np.ndarray:
         """Convenience wrapper — returns audio only, discards word entries."""
-        audio, _ = self.synthesise_with_words(text)
+        audio, _ = self.synthesise_with_words(text, voice_override=voice_override)
         return audio
 
     def close(self):

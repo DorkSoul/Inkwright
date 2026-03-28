@@ -11,6 +11,11 @@ window.VOICE_DATA = {
   favourites:         {{ favourites         | tojson }},
 };
 window.EXISTING_VOICE_PREVIEWS = {{ existing_voice_previews | tojson }};
+{% if cast and cast.status.value == 'done' and cast.cast_json %}
+window.CAST_DATA = {{ cast.cast_json | safe }};
+{% else %}
+window.CAST_DATA = null;
+{% endif %}
 </script>
 
 {# ── Progress polling (queued / processing only) ── #}
@@ -403,6 +408,147 @@ document.addEventListener('DOMContentLoaded', function() {
       cStatusEl.textContent = n + ' cached preview' + (n !== 1 ? 's' : '') + ' (from previous session)';
     }
   }
+
+  // ── Character Voices ──
+  var castBookId = {{ book.id }};
+  var castData = null; // populated after analysis
+
+  if (document.getElementById('cast-analyse-btn')) {
+  document.getElementById('cast-analyse-btn').addEventListener('click', function() {
+    var provider = document.getElementById('cast-provider').value;
+    var body = new FormData();
+    body.append('provider', provider);
+    document.getElementById('cast-analyse-btn').disabled = true;
+    document.getElementById('cast-status').textContent = 'Starting analysis...';
+    fetch('/book/' + castBookId + '/analyse-characters', { method: 'POST', body: body })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.error) {
+          document.getElementById('cast-status').textContent = 'Error: ' + d.error;
+          document.getElementById('cast-analyse-btn').disabled = false;
+        } else {
+          pollCastStatus();
+        }
+      })
+      .catch(function() {
+        document.getElementById('cast-status').textContent = 'Failed to start.';
+        document.getElementById('cast-analyse-btn').disabled = false;
+      });
+  });
+
+  function pollCastStatus() {
+    fetch('/book/' + castBookId + '/analyse-characters/status')
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var fill = document.getElementById('cast-progress-fill');
+        var bar = document.getElementById('cast-progress-bar');
+        bar.style.display = 'block';
+        fill.style.width = (d.progress_pct || 0) + '%';
+        if (d.status === 'analysing') {
+          document.getElementById('cast-status').textContent = d.status_text || 'Analysing...';
+          setTimeout(pollCastStatus, 3000);
+        } else if (d.status === 'done') {
+          bar.style.display = 'none';
+          document.getElementById('cast-status').textContent = '';
+          document.getElementById('cast-analyse-btn').disabled = false;
+          castData = d.cast;
+          renderCastCharacters(d.cast);
+        } else if (d.status === 'error') {
+          bar.style.display = 'none';
+          document.getElementById('cast-status').textContent = 'Error: ' + (d.error_msg || 'unknown');
+          document.getElementById('cast-analyse-btn').disabled = false;
+        } else {
+          document.getElementById('cast-status').textContent = '';
+          document.getElementById('cast-analyse-btn').disabled = false;
+        }
+      })
+      .catch(function() { setTimeout(pollCastStatus, 5000); });
+  }
+
+  function renderCastCharacters(cast) {
+    var list = document.getElementById('cast-character-list');
+    list.innerHTML = '';
+    var characters = cast.characters || {};
+    var names = Object.keys(characters).sort(function(a, b) {
+      if (a === 'NARRATOR') return -1;
+      if (b === 'NARRATOR') return 1;
+      return a.localeCompare(b);
+    });
+    names.forEach(function(name) {
+      var row = document.createElement('div');
+      row.className = 'cast-char-row';
+      var label = document.createElement('span');
+      label.className = 'cast-char-name';
+      label.textContent = name;
+      var sel = document.createElement('select');
+      sel.className = 'cast-voice-sel voice-select';
+      sel.dataset.character = name;
+      // populate with all voices grouped by language
+      var currentVoice = (characters[name] && characters[name].voice) || '';
+      Object.keys(VD.voices_by_language).forEach(function(lang) {
+        var voices = VD.voices_by_language[lang];
+        var grp = document.createElement('optgroup');
+        grp.label = VD.languages[lang] || lang;
+        Object.keys(voices).forEach(function(vid) {
+          var opt = document.createElement('option');
+          opt.value = vid;
+          opt.textContent = voices[vid];
+          if (vid === currentVoice) opt.selected = true;
+          grp.appendChild(opt);
+        });
+        sel.appendChild(grp);
+      });
+      row.appendChild(label);
+      row.appendChild(sel);
+      list.appendChild(row);
+    });
+    list.style.display = 'block';
+    document.getElementById('cast-save-btn').style.display = 'inline-block';
+    document.getElementById('cast-reset-btn').style.display = 'inline-block';
+  }
+
+  document.getElementById('cast-save-btn').addEventListener('click', function() {
+    var updates = {};
+    document.querySelectorAll('.cast-voice-sel').forEach(function(sel) {
+      var name = sel.dataset.character;
+      if (!castData.characters[name]) castData.characters[name] = {};
+      castData.characters[name].voice = sel.value;
+      updates[name] = {voice: sel.value};
+    });
+    fetch('/book/' + castBookId + '/characters', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({characters: updates}),
+    }).then(function() {
+      document.getElementById('cast-status').textContent = 'Voice assignments saved.';
+      setTimeout(function() { document.getElementById('cast-status').textContent = ''; }, 3000);
+    });
+  });
+
+  document.getElementById('cast-reset-btn').addEventListener('click', function() {
+    if (!confirm('Delete the character analysis for this book?')) return;
+    fetch('/book/' + castBookId + '/characters', { method: 'DELETE' })
+      .then(function() {
+        document.getElementById('cast-character-list').innerHTML = '';
+        document.getElementById('cast-character-list').style.display = 'none';
+        document.getElementById('cast-save-btn').style.display = 'none';
+        document.getElementById('cast-reset-btn').style.display = 'none';
+        document.getElementById('cast-analyse-btn').disabled = false;
+        document.getElementById('cast-status').textContent = 'Analysis cleared.';
+        castData = null;
+      });
+  });
+
+  // On page load, check if analysis already exists
+  if (window.CAST_DATA) {
+    castData = window.CAST_DATA;
+    renderCastCharacters(window.CAST_DATA);
+  } else {
+    pollCastStatus();
+  }
+
+  } // end if cast-analyse-btn exists
+
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,6 +812,39 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
             {% endif %}
             {% endfor %}
           </div>
+        </div>
+      </details>
+
+      {# ── Character Voices ── #}
+      <details class="regen-details">
+        <summary class="regen-summary">Character Voices (Experimental)</summary>
+        <div class="compare-all-body">
+
+          <div class="tts-control-row">
+            <label for="cast-provider">Analyse with</label>
+            <select id="cast-provider" class="voice-select">
+              <option value="ollama_7b" {% if not claude_configured %}selected{% endif %}>Local — Fast (7B, ~4.5 GB download)</option>
+              <option value="ollama_14b">Local — Accurate (14B, ~8 GB download)</option>
+              <option value="claude" {% if claude_configured %}selected{% endif %}>Claude API (best quality, requires API key)</option>
+            </select>
+          </div>
+
+          <div class="compare-actions-row">
+            <button type="button" class="btn btn-secondary" id="cast-analyse-btn">Analyse Book</button>
+            <span class="preview-status" id="cast-status"></span>
+          </div>
+
+          <div id="cast-progress-bar">
+            <div id="cast-progress-fill"></div>
+          </div>
+
+          <div id="cast-character-list"></div>
+
+          <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+            <button type="button" class="btn btn-secondary" id="cast-save-btn">Save Voice Assignments</button>
+            <button type="button" class="btn btn-danger" id="cast-reset-btn">Reset / Re-analyse</button>
+          </div>
+
         </div>
       </details>
       {% endif %}

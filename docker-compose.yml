@@ -1,17 +1,44 @@
 services:
   inkwright:
-    image: ghcr.io/dorksoul/inkwright:latest
+    image: ghcr.io/dorksoul/inkwright:perchar
     container_name: inkwright
+    depends_on:
+      - ollama
     ports:
       - "8084:8084"
     volumes:
-      - /path/to/config:/config        # DB, covers, previews, favourites
-      - /path/to/books:/books          # EPUB files
-      - /path/to/audiobooks:/audiobooks  # Generated MP3s + index files
+      - /path/to/config:/config
+      - /path/to/books:/books
+      - /path/to/audiobooks:/audiobooks
     environment:
       - BOOKS_DIR=/books
       - AUDIOBOOKS_DIR=/audiobooks
       - CONFIG_DIR=/config
       - PORT=8084
-      # - SECRET_KEY=change-me         # Optional: set a stable secret key
+      - OLLAMA_HOST=http://ollama:11434
+      # LLM provider: ollama_7b | ollama_14b | claude
+      # Leave as ollama_7b for free local inference (no API key needed)
+      - LLM_PROVIDER=ollama_7b
+      # Uncomment and set to use Claude API instead:
+      # - LLM_PROVIDER=claude
+      # - CLAUDE_API_KEY=sk-ant-...
+      # - SECRET_KEY=change-me
     restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: inkwright-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # GPU passthrough (optional — remove deploy block if CPU-only):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  ollama_data:

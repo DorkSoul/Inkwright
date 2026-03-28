@@ -3,7 +3,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime,
+    create_engine, Column, Integer, String, Float, DateTime, Text,
     Enum as SAEnum, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -43,6 +43,7 @@ class Book(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     audio_index = relationship("AudioIndex", back_populates="book", uselist=False, cascade="all, delete-orphan")
+    character_cast = relationship("CharacterCast", back_populates="book", uselist=False, cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -58,6 +59,29 @@ class Book(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class CastStatus(str, enum.Enum):
+    none = "none"
+    analysing = "analysing"
+    done = "done"
+    error = "error"
+
+
+class CharacterCast(Base):
+    __tablename__ = "character_casts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    book_id = Column(Integer, ForeignKey("books.id"), nullable=False, unique=True)
+    status = Column(SAEnum(CastStatus), nullable=False, default=CastStatus.none)
+    llm_provider = Column(String, nullable=True)
+    progress_pct = Column(Float, nullable=False, default=0.0)
+    error_msg = Column(String, nullable=True)
+    cast_json = Column(Text, nullable=True)   # JSON blob: {characters:{}, segments:[]}
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    book = relationship("Book", back_populates="character_cast")
 
 
 class AudioIndex(Base):
@@ -106,6 +130,7 @@ def _migrate(eng):
         "ALTER TABLE books ADD COLUMN series_index FLOAT",
         "ALTER TABLE books ADD COLUMN publisher VARCHAR",
         "ALTER TABLE books ADD COLUMN published_date VARCHAR",
+        "CREATE TABLE IF NOT EXISTS character_casts (id INTEGER PRIMARY KEY AUTOINCREMENT, book_id INTEGER NOT NULL UNIQUE REFERENCES books(id), status VARCHAR NOT NULL DEFAULT 'none', llm_provider VARCHAR, progress_pct FLOAT NOT NULL DEFAULT 0.0, error_msg VARCHAR, cast_json TEXT, created_at DATETIME, updated_at DATETIME)",
     ]
     with eng.connect() as conn:
         for stmt in migrations:
@@ -117,13 +142,22 @@ def _migrate(eng):
 
 
 def _reset_stuck_jobs():
-    """On startup, any book stuck in 'processing' is reset to 'queued'."""
+    """On startup, reset any book stuck in 'processing' to 'queued', and any
+    CharacterCast stuck in 'analysing' back to 'none'."""
     session = Session()
     try:
         stuck = session.query(Book).filter(Book.tts_status == TTSStatus.processing).all()
         for book in stuck:
             book.tts_status = TTSStatus.queued
             book.tts_progress_pct = 0.0
+
+        stuck_casts = session.query(CharacterCast).filter(
+            CharacterCast.status == CastStatus.analysing
+        ).all()
+        for cast in stuck_casts:
+            cast.status = CastStatus.none
+            cast.progress_pct = 0.0
+
         session.commit()
     finally:
         session.close()

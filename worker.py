@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -5,7 +6,7 @@ import time
 import traceback
 from datetime import datetime
 
-from models import AudioIndex, Book, TTSStatus, get_session
+from models import AudioIndex, Book, CharacterCast, TTSStatus, get_session
 from epub_parser import parse_epub, save_cover
 from tts_engine import TTSEngine, SAMPLE_RATE
 from audio_utils import audio_to_mp3, write_index_atomic
@@ -82,6 +83,23 @@ def _process_book(book_id: int):
         book.updated_at = datetime.utcnow()
         session.commit()
 
+        # Check for a completed character cast
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        cast_data = (
+            json.loads(cast.cast_json)
+            if (cast and cast.status.value == 'done' and cast.cast_json)
+            else None
+        )
+
+        # Build paragraph_index → voice_id lookup from cast data
+        para_speaker: dict[int, str] = {}
+        if cast_data:
+            char_voices = cast_data.get('characters', {})
+            for seg in cast_data.get('segments', []):
+                speaker = seg.get('speaker', 'NARRATOR')
+                voice = (char_voices.get(speaker) or {}).get('voice') or None
+                para_speaker[seg['paragraph_index']] = voice
+
         epub_path = os.path.join(BOOKS_DIR, book.epub_filename)
         logger.info("Processing book %d: %s", book_id, epub_path)
 
@@ -122,7 +140,8 @@ def _process_book(book_id: int):
 
         try:
             for i, para in enumerate(paragraphs):
-                para_audio, para_words = engine.synthesise_with_words(para.text)
+                voice_override = para_speaker.get(para.paragraph_index) if cast_data else None
+                para_audio, para_words = engine.synthesise_with_words(para.text, voice_override=voice_override)
                 para_duration = len(para_audio) / SAMPLE_RATE
 
                 source_para_entries.append({

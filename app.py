@@ -14,10 +14,11 @@ from flask import (
 )
 
 import models
-from models import AudioIndex, Book, TTSStatus, db_init, get_session
+from models import AudioIndex, Book, CharacterCast, CastStatus, TTSStatus, db_init, get_session
 from sqlalchemy.orm import joinedload
 from epub_parser import parse_epub, save_cover
 import worker
+import character_parser
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +45,12 @@ MAX_UPLOAD_MB = int(os.environ.get('MAX_UPLOAD_MB', '50'))
 _preview_jobs = {}      # book_id → {status, voice, speed, error}
 _preview_all_jobs = {}  # book_id → {status, speed, voices: {voice: 'pending'|'generating'|'ready'|'error'}}
 _preview_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Character cast job state (in-memory status text — progress stored in DB)
+# ---------------------------------------------------------------------------
+_cast_jobs = {}         # book_id → {status_text: str}
+_cast_lock = threading.Lock()
 
 PREVIEW_TARGET_CHARS = 700   # ~45–60 s of speech at 1× speed
 
@@ -282,6 +289,14 @@ def book_detail(book_id):
             if os.path.exists(os.path.join(PREVIEWS_DIR, f"{book_id}_{v}_preview.mp3"))
         ]
 
+        # Character cast
+        cast = (
+            session.query(CharacterCast)
+            .filter(CharacterCast.book_id == book_id)
+            .first()
+        )
+        claude_configured = bool(os.environ.get('CLAUDE_API_KEY'))
+
         return render_template(
             'book_detail.html',
             book=book,
@@ -294,6 +309,8 @@ def book_detail(book_id):
             favourites=_load_favourites(),
             preview_exists=preview_exists,
             existing_voice_previews=existing_voice_previews,
+            cast=cast,
+            claude_configured=claude_configured,
         )
     finally:
         session.close()
@@ -904,6 +921,186 @@ def preview_all_status(book_id):
         'status': job.get('status', 'none'),
         'voices': voices,
     })
+
+
+# ---------------------------------------------------------------------------
+# Routes — Character analysis
+# ---------------------------------------------------------------------------
+
+VALID_LLM_PROVIDERS = ('ollama_7b', 'ollama_14b', 'claude')
+
+
+def _run_character_analysis(book_id: int, epub_path: str, provider: str):
+    """Background thread: parse EPUB, run LLM analysis, save results to DB."""
+    session = get_session()
+    try:
+        parsed = parse_epub(epub_path)
+        paragraphs = parsed.paragraphs
+
+        def progress_callback(pct, status_text):
+            s = get_session()
+            try:
+                s.query(CharacterCast).filter(CharacterCast.book_id == book_id).update({
+                    'progress_pct': pct,
+                    'updated_at': datetime.utcnow(),
+                })
+                s.commit()
+            finally:
+                s.close()
+            with _cast_lock:
+                _cast_jobs[book_id] = {'status_text': status_text}
+
+        result = character_parser.analyse_book(paragraphs, provider, progress_callback)
+
+        cast_json_str = json.dumps(result)
+        session.query(CharacterCast).filter(CharacterCast.book_id == book_id).update({
+            'status': CastStatus.done,
+            'cast_json': cast_json_str,
+            'progress_pct': 100.0,
+            'error_msg': None,
+            'updated_at': datetime.utcnow(),
+        })
+        session.commit()
+        logger.info("Character analysis done for book %d (%d characters, %d segments)",
+                    book_id, len(result.get('characters', {})), len(result.get('segments', [])))
+    except Exception as e:
+        logger.error("Character analysis failed for book %d: %s", book_id, e)
+        try:
+            session.query(CharacterCast).filter(CharacterCast.book_id == book_id).update({
+                'status': CastStatus.error,
+                'error_msg': str(e)[:500],
+                'updated_at': datetime.utcnow(),
+            })
+            session.commit()
+        except Exception as db_err:
+            logger.error("Could not write error status for cast book %d: %s", book_id, db_err)
+    finally:
+        session.close()
+        with _cast_lock:
+            _cast_jobs.pop(book_id, None)
+
+
+@app.route('/book/<int:book_id>/analyse-characters', methods=['POST'])
+def analyse_characters(book_id):
+    provider = request.form.get('provider', 'ollama_7b')
+    if provider not in VALID_LLM_PROVIDERS:
+        return jsonify({'error': f'Invalid provider: {provider}'}), 400
+
+    if provider == 'claude' and not os.environ.get('CLAUDE_API_KEY'):
+        return jsonify({'error': 'CLAUDE_API_KEY not set'}), 400
+
+    session = get_session()
+    try:
+        book = _get_book_or_404(book_id, session)
+        epub_path = os.path.join(BOOKS_DIR, book.epub_filename)
+
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        if cast is None:
+            cast = CharacterCast(
+                book_id=book_id,
+                status=CastStatus.analysing,
+                llm_provider=provider,
+                progress_pct=0.0,
+                error_msg=None,
+                cast_json=None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+            session.add(cast)
+        else:
+            cast.status = CastStatus.analysing
+            cast.llm_provider = provider
+            cast.progress_pct = 0.0
+            cast.error_msg = None
+            cast.cast_json = None
+            cast.updated_at = datetime.utcnow()
+        session.commit()
+    finally:
+        session.close()
+
+    with _cast_lock:
+        _cast_jobs[book_id] = {'status_text': 'Starting analysis...'}
+
+    threading.Thread(
+        target=_run_character_analysis,
+        args=(book_id, epub_path, provider),
+        daemon=True,
+    ).start()
+
+    return jsonify({'status': 'started'})
+
+
+@app.route('/book/<int:book_id>/analyse-characters/status')
+def analyse_characters_status(book_id):
+    session = get_session()
+    try:
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        if cast is None:
+            return jsonify({'status': 'none', 'progress_pct': 0, 'error_msg': None})
+
+        with _cast_lock:
+            job = dict(_cast_jobs.get(book_id, {}))
+
+        resp = {
+            'status': cast.status.value,
+            'progress_pct': cast.progress_pct or 0,
+            'error_msg': cast.error_msg,
+            'status_text': job.get('status_text', ''),
+        }
+        if cast.status == CastStatus.done and cast.cast_json:
+            resp['cast'] = json.loads(cast.cast_json)
+        return jsonify(resp)
+    finally:
+        session.close()
+
+
+@app.route('/book/<int:book_id>/characters', methods=['POST'])
+def update_characters(book_id):
+    """Update voice assignments for characters in the cast."""
+    data = request.get_json(silent=True) or {}
+    updates = data.get('characters', {})
+    if not isinstance(updates, dict):
+        return jsonify({'error': 'characters must be an object'}), 400
+
+    session = get_session()
+    try:
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        if cast is None or not cast.cast_json:
+            return jsonify({'error': 'No character cast found for this book'}), 404
+
+        cast_data = json.loads(cast.cast_json)
+        characters = cast_data.get('characters', {})
+        for name, char_data in updates.items():
+            if name not in characters:
+                characters[name] = {}
+            if isinstance(char_data, dict):
+                characters[name].update(char_data)
+        cast_data['characters'] = characters
+        cast.cast_json = json.dumps(cast_data)
+        cast.updated_at = datetime.utcnow()
+        session.commit()
+    finally:
+        session.close()
+
+    return jsonify({'ok': True})
+
+
+@app.route('/book/<int:book_id>/characters', methods=['DELETE'])
+def delete_characters(book_id):
+    """Delete the character cast for a book."""
+    session = get_session()
+    try:
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        if cast is not None:
+            session.delete(cast)
+            session.commit()
+    finally:
+        session.close()
+
+    with _cast_lock:
+        _cast_jobs.pop(book_id, None)
+
+    return jsonify({'ok': True})
 
 
 # ---------------------------------------------------------------------------

@@ -1391,3 +1391,41 @@ details[open] .regen-summary::before { content: '− '; }
   transition: background .15s;
 }
 .mass-import-btn:hover { background: var(--border); color: var(--text); }
+
+/* ── Character Cast UI ────────────────────────────── */
+.cast-char-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.cast-char-row:last-child { border-bottom: none; }
+.cast-char-name {
+  min-width: 140px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+#cast-character-list {
+  display: none;
+  margin: 1rem 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.75rem;
+}
+#cast-progress-bar {
+  display: none;
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  margin: 0.5rem 0;
+  overflow: hidden;
+}
+#cast-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.4s;
+  width: 0%;
+}
+#cast-save-btn, #cast-reset-btn { display: none; }
