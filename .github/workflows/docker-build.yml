@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - PerChar
   workflow_dispatch:
 
 env:
@@ -51,6 +52,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=perchar,enable=${{ github.ref == 'refs/heads/PerChar' }}
             type=sha,prefix=sha-
 
       - name: Build and push Docker image
