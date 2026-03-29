@@ -1,10 +1,13 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 import traceback
 from datetime import datetime
+
+import numpy as np
 
 from models import AudioIndex, Book, CharacterCast, TTSStatus, get_session
 from epub_parser import parse_epub, save_cover
@@ -101,6 +104,78 @@ def _build_index(book_id: int, title: str, author: str,
     }
 
 
+# ---------------------------------------------------------------------------
+# Dialogue / narration splitting
+# ---------------------------------------------------------------------------
+
+# Matches both straight ("...") and curly ("...") double-quoted dialogue
+_DIALOGUE_RE = re.compile(r'(?:"[^"]*"|\u201c[^\u201d]*\u201d)')
+
+
+def _split_dialogue(text: str, char_voice: str) -> list[tuple[int, str, str | None]]:
+    """
+    Split a paragraph into (char_offset, segment_text, voice_override) tuples.
+
+    Quoted segments → char_voice.
+    Everything else → None (narrator / engine default).
+    Returns a single-element list when there are no quotes.
+    """
+    results = []
+    last = 0
+    for m in _DIALOGUE_RE.finditer(text):
+        if m.start() > last:
+            results.append((last, text[last:m.start()], None))
+        results.append((m.start(), m.group(0), char_voice))
+        last = m.end()
+    if last < len(text):
+        results.append((last, text[last:], None))
+    return results or [(0, text, char_voice)]
+
+
+def _synthesise_para(engine, text: str, char_voice: str | None) -> tuple[np.ndarray, list]:
+    """
+    Synthesise a paragraph, using char_voice for quoted dialogue and the
+    engine's default voice for narration/attribution.
+
+    Returns (audio_array, word_entries) with timings relative to the
+    start of the paragraph and char positions relative to `text`.
+    """
+    if not char_voice:
+        # Pure narration — no splitting needed
+        return engine.synthesise_with_words(text, voice_override=None)
+
+    segments = _split_dialogue(text, char_voice)
+
+    if len(segments) == 1:
+        # No quote boundaries found — entire paragraph in one voice
+        return engine.synthesise_with_words(text, voice_override=char_voice)
+
+    all_audio: list[np.ndarray] = []
+    all_words: list[dict] = []
+    seg_time = 0.0
+
+    for char_offset, seg_text, seg_voice in segments:
+        if not seg_text.strip():
+            # Whitespace-only gap — skip synthesis but don't lose char positions
+            continue
+        audio, words = engine.synthesise_with_words(seg_text, voice_override=seg_voice)
+        dur = len(audio) / SAMPLE_RATE
+        all_audio.append(audio)
+        for w in words:
+            all_words.append({
+                'char_start':  char_offset + w['char_start'],
+                'char_end':    char_offset + w['char_end'],
+                'start_time':  seg_time + w['start_time'],
+                'end_time':    seg_time + w['end_time'],
+            })
+        seg_time += dur
+
+    if not all_audio:
+        return np.zeros(SAMPLE_RATE // 10, dtype=np.float32), []
+
+    return np.concatenate(all_audio), all_words
+
+
 def _process_book(book_id: int):
     mp3_path = None
     session = get_session()
@@ -194,7 +269,7 @@ def _process_book(book_id: int):
                         raise _CancelledError()
 
                 voice_override = para_speaker.get(para.paragraph_index) if cast_data else None
-                para_audio, para_words = engine.synthesise_with_words(para.text, voice_override=voice_override)
+                para_audio, para_words = _synthesise_para(engine, para.text, voice_override)
                 para_duration = len(para_audio) / SAMPLE_RATE
 
                 source_para_entries.append({
