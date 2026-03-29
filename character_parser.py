@@ -278,6 +278,92 @@ def _resolve_word_to_character(
 
 _QUOTE_CHARS_RE = re.compile(r'["\u201c\u201d]')
 
+# A character name called directly at the start of a quote (vocative address):
+#   "Maura Connelly," he said   →   Maura Connelly is the addressee
+#   "John, what are you doing?" →   John is the addressee
+_VOCATIVE_RE = re.compile(r'["\u201c]([A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)?)[,!?]')
+
+
+def _find_addressee(
+    text: str,
+    first_to_chars: dict[str, list[str]],
+    character_roster: set,
+) -> str | None:
+    """
+    Return the character being directly addressed (called by name) in this paragraph,
+    or None if no such vocative pattern is found.
+    """
+    for m in _VOCATIVE_RE.finditer(text):
+        name_str = m.group(1).strip()
+        first = name_str.split()[0].lower()
+        candidates = first_to_chars.get(first, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        # Try exact full-name match (case-insensitive)
+        for name in character_roster:
+            if name.lower() == name_str.lower():
+                return name
+    return None
+
+
+def _resolve_from_conversational_context(
+    paragraphs: list,
+    speaker_map: dict[int, str],
+    character_roster: set,
+    gender_map: dict[str, str],
+) -> None:
+    """
+    Sequential pass over paragraphs to resolve unattributed dialogue using
+    conversational turn-taking.
+
+    Core insight: when a character is directly addressed by name
+    ("Maura Connelly," he said), they are the most likely speaker in the
+    next dialogue paragraph where the pronoun matches their gender.
+
+    Runs after _override_speakers_from_attribution so it only touches
+    paragraphs that still have no resolved speaker (NARRATOR with quotes).
+    """
+    first_to_chars: dict[str, list[str]] = {}
+    for name in character_roster:
+        if name != 'NARRATOR':
+            first_to_chars.setdefault(name.split()[0].lower(), []).append(name)
+
+    last_addressee: str | None = None
+    resolved = 0
+
+    for para in sorted(paragraphs, key=lambda p: p.paragraph_index):
+        text = para.text
+        current = speaker_map.get(para.paragraph_index, 'NARRATOR')
+
+        # Track who is being addressed in this paragraph
+        addressee = _find_addressee(text, first_to_chars, character_roster)
+        if addressee:
+            last_addressee = addressee
+
+        # Only try to improve paragraphs still marked NARRATOR that contain quotes
+        if current != 'NARRATOR' or not _QUOTE_CHARS_RE.search(text):
+            continue
+        if last_addressee is None:
+            continue
+
+        # Find the pronoun in the attribution pattern
+        for m in _ATTR_AFTER_RE.finditer(text):
+            word = m.group(1).lower()
+            if word not in (_MALE_PRONOUNS | _FEMALE_PRONOUNS | _NB_PRONOUNS):
+                continue
+            pronoun_gender = ('M' if word in _MALE_PRONOUNS else
+                              'F' if word in _FEMALE_PRONOUNS else 'N')
+            addr_gender = gender_map.get(last_addressee)
+            # Use addressee if their gender matches the pronoun, or if unknown
+            if addr_gender is None or addr_gender == pronoun_gender:
+                speaker_map[para.paragraph_index] = last_addressee
+                resolved += 1
+                break
+
+    if resolved:
+        logger.info("Conversational context resolved %d paragraph(s) via addressee tracking",
+                    resolved)
+
 
 def _force_narrator_no_quotes(paragraphs: list, speaker_map: dict[int, str]) -> None:
     """
@@ -485,8 +571,9 @@ Rules (follow strictly):
 2. Quotation marks present → identify who speaks the quoted words.
 3. Read the attribution verb: "text," she said → SHE is the speaker, not whoever is addressed.
 4. "text," he said → HE is the speaker. "text," John said → JOHN is the speaker.
-5. A character being MENTIONED or ADDRESSED in a paragraph does NOT make them the speaker.
-6. Use exact character names (consistent spelling). Return ONLY valid JSON."""
+5. A character being MENTIONED or ADDRESSED does NOT make them the speaker of that paragraph.
+6. Turn-taking: when a character is called by name ("Maura," he said), they are likely to speak next.
+7. Use exact character names (consistent spelling). Return ONLY valid JSON."""
 
 
 def _build_user_message(roster, indexed_paragraphs):
@@ -495,12 +582,12 @@ def _build_user_message(roster, indexed_paragraphs):
     lines = [
         f"Known characters: {roster_str}",
         "",
-        'Examples of correct attribution:',
-        '  [0] A man named Colm was waiting at the gate. He recognised her.  → NARRATOR (no quotes)',
-        '  [1] "Maura Connelly," he said, not quite a question.              → Colm (HE said it)',
-        '  [2] "I\'ve been told that," she said, and got in the car.         → whoever SHE is',
+        'Examples:',
+        '  [0] A man named Colm was waiting. He recognised her.   → NARRATOR (no quotes)',
+        '  [1] "Maura Connelly," he said, not quite a question.   → Colm  (HE said it; Maura is addressed)',
+        '  [2] "I\'ve been told that," she said, and got in car.  → Maura (SHE said it; she was addressed in [1])',
         "",
-        "Identify the primary speaker for each numbered paragraph. Return JSON:",
+        "Return JSON:",
         '{',
         '  "new_characters": ["Name1", "Name2"],',
         '  "speakers": {"0": "NARRATOR", "1": "Colm", "2": "Maura"}',
@@ -613,6 +700,11 @@ def analyse_book(paragraphs, provider, progress_callback=None):
     #    If the pronoun contradicts the current speaker's gender but we can't
     #    identify who it is, fall back to NARRATOR rather than use the wrong voice.
     _override_speakers_from_attribution(paragraphs, speaker_map, character_roster, gender_map)
+
+    # 4. Conversational context: track who was just addressed by name and use
+    #    that to resolve paragraphs still marked NARRATOR after step 3.
+    #    e.g. '"Maura Connelly," he said' → next "she said" → Maura.
+    _resolve_from_conversational_context(paragraphs, speaker_map, character_roster, gender_map)
 
     # Build output — seed each character dict with inferred gender
     characters = {
