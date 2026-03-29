@@ -20,6 +20,31 @@ BOOKS_DIR = '/books'
 AUDIOBOOKS_DIR = '/audiobooks'
 COVERS_DIR = '/config/covers'
 
+# In-memory progress state — read by app.py's status endpoint
+# book_id → {stage, para_current, para_total, eta_seconds, elapsed_seconds}
+_book_progress: dict[int, dict] = {}
+_progress_lock = threading.Lock()
+
+
+def _set_progress(book_id: int, **kwargs):
+    with _progress_lock:
+        _book_progress.setdefault(book_id, {}).update(kwargs)
+
+
+def _clear_progress(book_id: int):
+    with _progress_lock:
+        _book_progress.pop(book_id, None)
+
+
+def _fmt_eta(seconds: float) -> str:
+    """Format seconds into a human-readable ETA string."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
 
 def _build_index(book_id: int, title: str, author: str,
                   source_para_entries: list, word_entries: list) -> dict:
@@ -83,14 +108,19 @@ def _process_book(book_id: int):
         book.updated_at = datetime.utcnow()
         session.commit()
 
+        _set_progress(book_id, stage='Starting...', para_current=0, para_total=0,
+                      eta_seconds=None, elapsed_seconds=0.0)
+
         # Use character cast only when explicitly requested
         cast_data = None
         if book.tts_use_cast:
             cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
             if cast and cast.status.value == 'done' and cast.cast_json:
                 cast_data = json.loads(cast.cast_json)
+                logger.info("Book %d: using character cast (%d characters)",
+                            book_id, len(cast_data.get('characters', {})))
             else:
-                logger.warning("Book %d: tts_use_cast=True but no completed cast found — using default voice", book_id)
+                logger.warning("Book %d: tts_use_cast=True but no completed cast — using default voice", book_id)
 
         # Build paragraph_index → voice_id lookup from cast data
         para_speaker: dict[int, str] = {}
@@ -102,7 +132,8 @@ def _process_book(book_id: int):
                 para_speaker[seg['paragraph_index']] = voice
 
         epub_path = os.path.join(BOOKS_DIR, book.epub_filename)
-        logger.info("Processing book %d: %s", book_id, epub_path)
+        logger.info("Book %d: parsing EPUB — %s", book_id, os.path.basename(epub_path))
+        _set_progress(book_id, stage='Parsing EPUB...')
 
         # --- Parse EPUB ---
         parsed = parse_epub(epub_path)
@@ -122,6 +153,11 @@ def _process_book(book_id: int):
         if total == 0:
             raise ValueError("EPUB produced no parseable paragraphs")
 
+        logger.info("Book %d: %d paragraphs across %d chapters — loading TTS engine",
+                    book_id, total,
+                    len({p.chapter_index for p in paragraphs}))
+        _set_progress(book_id, stage='Loading TTS engine...', para_total=total)
+
         # --- TTS ---
         voice       = book.tts_voice       or 'af_heart'
         speed       = float(book.tts_speed)       if book.tts_speed       is not None else 1.0
@@ -138,6 +174,9 @@ def _process_book(book_id: int):
         source_para_entries = []
         word_entries        = []
         current_time        = 0.0
+        synth_start         = time.time()
+
+        LOG_INTERVAL = max(1, total // 20)  # log ~every 5% of paragraphs
 
         try:
             for i, para in enumerate(paragraphs):
@@ -166,22 +205,43 @@ def _process_book(book_id: int):
                 audio_chunks.append(para_audio)
                 current_time += para_duration
 
-                pct = round((i + 1) / total * 100, 1)
-                if (i + 1) % 10 == 0 or (i + 1) == total:
+                done = i + 1
+                pct = round(done / total * 100, 1)
+
+                elapsed = time.time() - synth_start
+                rate = done / elapsed if elapsed > 0 else 0
+                eta = (total - done) / rate if rate > 0 else None
+
+                _set_progress(book_id,
+                              stage=f'Synthesising — {para.chapter_title}',
+                              para_current=done,
+                              para_total=total,
+                              elapsed_seconds=round(elapsed),
+                              eta_seconds=round(eta) if eta is not None else None)
+
+                if done % 10 == 0 or done == total:
                     session.query(Book).filter(Book.id == book_id).update(
                         {'tts_progress_pct': pct, 'updated_at': datetime.utcnow()}
                     )
                     session.commit()
-                    logger.debug("Book %d: %d/%d paragraphs (%.1f%%)", book_id, i + 1, total, pct)
+
+                if done % LOG_INTERVAL == 0 or done == total:
+                    eta_str = f'ETA ~{_fmt_eta(eta)}' if eta is not None else 'ETA unknown'
+                    logger.info("Book %d: %d/%d paragraphs (%.0f%%) — %s",
+                                book_id, done, total, pct, eta_str)
         finally:
             engine.close()
 
         # --- Audio export ---
+        logger.info("Book %d: synthesis complete (%.1f min audio) — encoding MP3",
+                    book_id, current_time / 60)
+        _set_progress(book_id, stage='Encoding MP3...', eta_seconds=None)
         mp3_filename = f"{book_id}.mp3"
         mp3_path     = os.path.join(AUDIOBOOKS_DIR, mp3_filename)
         total_duration = audio_to_mp3(audio_chunks, mp3_path)
 
         # --- JSON index ---
+        _set_progress(book_id, stage='Writing index...')
         index_filename = f"{book_id}.json"
         index_path = os.path.join(AUDIOBOOKS_DIR, index_filename)
         index_data = _build_index(book_id, parsed.title, parsed.author,
@@ -210,16 +270,18 @@ def _process_book(book_id: int):
         book.tts_progress_pct = 100.0
         book.updated_at = datetime.utcnow()
         session.commit()
+        _clear_progress(book_id)
 
         logger.info(
-            "Book %d done — %.1f s audio, %d chapters, %d paragraphs, %d words",
-            book_id, total_duration, len(index_data['chapters']),
+            "Book %d done — %.1f min audio, %d chapters, %d paragraphs, %d words",
+            book_id, total_duration / 60, len(index_data['chapters']),
             len(source_para_entries), len(word_entries)
         )
 
     except Exception as e:
         tb = traceback.format_exc()
         logger.error("Book %d failed: %s\n%s", book_id, e, tb)
+        _clear_progress(book_id)
         if mp3_path and os.path.exists(mp3_path):
             try:
                 os.remove(mp3_path)

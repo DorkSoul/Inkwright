@@ -23,23 +23,43 @@ window.CAST_DATA = null;
 <script>
 (function () {
   var bookId = {{ book.id }};
-  var pollInterval = 3000;
+  var pollInterval = 4000;
   var timer;
+
+  function fmtEta(s) {
+    if (!s || s < 1) return '';
+    s = Math.round(s);
+    if (s < 60)   return '~' + s + 's remaining';
+    if (s < 3600) return '~' + Math.floor(s/60) + 'm ' + (s%60) + 's remaining';
+    return '~' + Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm remaining';
+  }
+
   function poll() {
     fetch('/book/' + bookId + '/status')
       .then(function(r) { return r.json(); })
-      .then(function(data) {
+      .then(function(d) {
         var label = document.getElementById('progress-label');
+        var sub   = document.getElementById('progress-sub');
         var fill  = document.getElementById('progress-fill');
         var pct   = document.getElementById('progress-pct');
-        if (data.status === 'queued') {
-          label.textContent = 'Queued...';
+        if (d.status === 'queued') {
+          label.textContent = 'Queued — waiting for worker...';
+          if (sub) sub.textContent = '';
           fill.style.width = '0%'; pct.textContent = '0%';
           timer = setTimeout(poll, pollInterval);
-        } else if (data.status === 'processing') {
-          label.textContent = 'Processing...';
-          var p = data.tts_progress_pct || 0;
+        } else if (d.status === 'processing') {
+          var p = d.tts_progress_pct || 0;
           fill.style.width = p + '%'; pct.textContent = Math.round(p) + '%';
+          // Stage line
+          label.textContent = d.stage || 'Processing...';
+          // Sub-line: para count + ETA
+          if (sub) {
+            var parts = [];
+            if (d.para_total > 0) parts.push('Paragraph ' + d.para_current + ' / ' + d.para_total);
+            var eta = fmtEta(d.eta_seconds);
+            if (eta) parts.push(eta);
+            sub.textContent = parts.join(' — ');
+          }
           timer = setTimeout(poll, pollInterval);
         } else {
           window.location.reload();
@@ -445,8 +465,10 @@ document.addEventListener('DOMContentLoaded', function() {
         bar.style.display = 'block';
         fill.style.width = (d.progress_pct || 0) + '%';
         if (d.status === 'analysing') {
-          document.getElementById('cast-status').textContent = d.status_text || 'Analysing...';
-          setTimeout(pollCastStatus, 3000);
+          var st = d.status_text || 'Analysing...';
+          var cp = d.progress_pct || 0;
+          document.getElementById('cast-status').textContent = st + (cp > 0 ? ' (' + Math.round(cp) + '%)' : '');
+          setTimeout(pollCastStatus, 4000);
         } else if (d.status === 'done') {
           bar.style.display = 'none';
           document.getElementById('cast-status').textContent = '';
@@ -719,8 +741,9 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
       {% elif book.tts_status.value in ('queued', 'processing') %}
       <div class="progress-section" id="progress-section">
         <p class="progress-label" id="progress-label">
-          {% if book.tts_status.value == 'queued' %}Queued...{% else %}Processing...{% endif %}
+          {% if book.tts_status.value == 'queued' %}Queued — waiting for worker...{% else %}Processing...{% endif %}
         </p>
+        <p class="progress-sub" id="progress-sub"></p>
         <div class="progress-bar-track">
           <div class="progress-bar-fill" id="progress-fill" style="width: {{ book.tts_progress_pct }}%"></div>
         </div>

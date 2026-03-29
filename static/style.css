@@ -908,6 +908,7 @@ details[open] .regen-summary::before { content: '− '; }
 /* --- Progress bar --------------------------------------- */
 .progress-section { display: flex; flex-direction: column; gap: 0.4rem; }
 .progress-label { font-size: 0.9rem; color: var(--text-muted); }
+.progress-sub   { font-size: 0.8rem; color: var(--text-muted); margin: 0; min-height: 1em; }
 .progress-bar-track {
   height: 8px;
   background: var(--surface2);

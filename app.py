@@ -26,6 +26,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class _SuppressPolling(logging.Filter):
+    """Drop werkzeug access-log lines for high-frequency polling endpoints."""
+    _POLL_SUFFIXES = ('/status', '/analyse-characters/status')
+
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(s in msg for s in self._POLL_SUFFIXES)
+
+logging.getLogger('werkzeug').addFilter(_SuppressPolling())
+
 # ---------------------------------------------------------------------------
 # Config — overridable via environment variables
 # ---------------------------------------------------------------------------
@@ -400,10 +411,16 @@ def book_status(book_id):
     session = get_session()
     try:
         book = _get_book_or_404(book_id, session)
+        progress = dict(worker._book_progress.get(book_id, {}))
         return jsonify({
-            'status': book.tts_status.value,
+            'status':          book.tts_status.value,
             'tts_progress_pct': book.tts_progress_pct,
-            'tts_error': book.tts_error,
+            'tts_error':       book.tts_error,
+            'stage':           progress.get('stage', ''),
+            'para_current':    progress.get('para_current', 0),
+            'para_total':      progress.get('para_total', 0),
+            'eta_seconds':     progress.get('eta_seconds'),
+            'elapsed_seconds': progress.get('elapsed_seconds', 0),
         })
     finally:
         session.close()
