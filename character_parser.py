@@ -136,14 +136,35 @@ _PRONOUN_SCAN_RE = re.compile(
     r'\b(he|him|his|she|her|hers|they|them|their|theirs)\b', re.IGNORECASE
 )
 
+# Speech-attribution verbs used in both gender inference and attribution override
+_SAID_VERBS_PAT = (
+    r'(?:said|asked|replied|answered|shouted|whispered|called|cried|muttered|'
+    r'murmured|laughed|sighed|added|continued|began|told|declared|exclaimed|'
+    r'snapped|hissed|growled|grumbled|screamed|breathed|insisted|admitted|'
+    r'protested|agreed|confirmed|resumed|interrupted|responded|demanded|'
+    r'announced|suggested|offered|wondered|thought|remarked|noted|observed)'
+)
+
+# Pronoun immediately followed by a speech verb — these identify the SPEAKER of
+# dialogue, not the gender of a nearby character name.
+# e.g. '"Maura Connelly," he said' — "he" refers to Colm, not Maura.
+_SAID_PRONOUN_RE = re.compile(
+    r'\b(he|him|his|she|her|hers|they|them|their)\s+' + _SAID_VERBS_PAT,
+    re.IGNORECASE,
+)
+
 
 def _infer_genders(paragraphs: list, character_roster: set) -> dict[str, str]:
     """
     Infer gender (M/F/N) for each character by counting pronoun co-occurrences
     within a 200-character window around each mention of the character's first name.
 
+    Pronouns that are part of speech-attribution patterns ("he said", "she replied")
+    are excluded because they refer to the SPEAKER, not to a nearby character name.
+    e.g. '"Maura Connelly," he said' must not count "he" as a signal for Maura.
+
     Returns {character_name: 'M'|'F'|'N'} for characters with a clear signal.
-    Requires at least 3 pronoun matches and 60% agreement before committing.
+    Requires at least 2 pronoun matches and 60% agreement before committing.
     """
     names = [n for n in character_roster if n != 'NARRATOR']
 
@@ -163,10 +184,19 @@ def _infer_genders(paragraphs: list, character_roster: set) -> dict[str, str]:
 
     for para in paragraphs:
         text = para.text
+
+        # Build set of text positions that are speech-attribution pronouns to skip
+        attribution_positions: set[int] = {m.start() for m in _SAID_PRONOUN_RE.finditer(text)}
+
         for tok, pat in patterns.items():
-            for m in pat.finditer(text):
-                window = text[max(0, m.start() - 200): m.end() + 200]
+            for nm in pat.finditer(text):
+                window_start = max(0, nm.start() - 200)
+                window_end   = nm.end() + 200
+                window = text[window_start:window_end]
                 for pm in _PRONOUN_SCAN_RE.finditer(window):
+                    abs_pos = window_start + pm.start()
+                    if abs_pos in attribution_positions:
+                        continue  # skip: this pronoun attributes speech, not gender
                     p = pm.group(1).lower()
                     gender = ('M' if p in _MALE_PRONOUNS else
                               'F' if p in _FEMALE_PRONOUNS else
@@ -178,7 +208,7 @@ def _infer_genders(paragraphs: list, character_roster: set) -> dict[str, str]:
     result: dict[str, str] = {}
     for name, sc in scores.items():
         total = sc['M'] + sc['F'] + sc['N']
-        if total < 3:
+        if total < 2:
             continue
         best = max(sc, key=sc.get)
         if sc[best] / total >= 0.6:
@@ -186,22 +216,13 @@ def _infer_genders(paragraphs: list, character_roster: set) -> dict[str, str]:
 
     if result:
         logger.info("Inferred gender for %d character(s): %s",
-                    len(result),
-                    {n: g for n, g in result.items()})
+                    len(result), dict(result))
     return result
 
 
 # ---------------------------------------------------------------------------
 # Deterministic attribution override
 # ---------------------------------------------------------------------------
-
-_SAID_VERBS_PAT = (
-    r'(?:said|asked|replied|answered|shouted|whispered|called|cried|muttered|'
-    r'murmured|laughed|sighed|added|continued|began|told|declared|exclaimed|'
-    r'snapped|hissed|growled|grumbled|screamed|breathed|insisted|admitted|'
-    r'protested|agreed|confirmed|resumed|interrupted|responded|demanded|'
-    r'announced|suggested|offered|wondered|thought|remarked|noted|observed)'
-)
 
 # Pattern A: closing-quote  [,!?.]?  Name/pronoun  said-verb
 # e.g. "I've been told that," she said   OR   "Hello!" John exclaimed
@@ -255,6 +276,27 @@ def _resolve_word_to_character(
     return None
 
 
+_QUOTE_CHARS_RE = re.compile(r'["\u201c\u201d]')
+
+
+def _force_narrator_no_quotes(paragraphs: list, speaker_map: dict[int, str]) -> None:
+    """
+    Any paragraph that contains no quotation marks cannot contain dialogue,
+    so it must be NARRATOR regardless of what the LLM said.
+
+    This catches the common failure where the model reads a character's name in
+    narration and misattributes the whole paragraph to that character.
+    """
+    forced = 0
+    for para in paragraphs:
+        if not _QUOTE_CHARS_RE.search(para.text):
+            if speaker_map.get(para.paragraph_index) != 'NARRATOR':
+                speaker_map[para.paragraph_index] = 'NARRATOR'
+                forced += 1
+    if forced:
+        logger.info("Forced %d no-quote paragraph(s) to NARRATOR", forced)
+
+
 def _override_speakers_from_attribution(
     paragraphs: list,
     speaker_map: dict[int, str],
@@ -282,24 +324,33 @@ def _override_speakers_from_attribution(
         text = para.text
         found: str | None = None
 
-        # Try pattern A first (most reliable — attribution follows the quote)
-        for m in _ATTR_AFTER_RE.finditer(text):
-            candidate = _resolve_word_to_character(
-                m.group(1), character_roster, gender_map, first_to_chars
-            )
-            if candidate and candidate != 'NARRATOR':
-                found = candidate
-                break
+        current_speaker = speaker_map.get(para.paragraph_index, 'NARRATOR')
 
-        # Fall back to pattern B (attribution precedes the quote)
-        if found is None:
-            for m in _ATTR_BEFORE_RE.finditer(text):
+        def _try_patterns(pattern):
+            for m in pattern.finditer(text):
+                word = m.group(1)
                 candidate = _resolve_word_to_character(
-                    m.group(1), character_roster, gender_map, first_to_chars
+                    word, character_roster, gender_map, first_to_chars
                 )
                 if candidate and candidate != 'NARRATOR':
-                    found = candidate
-                    break
+                    return candidate
+                # Candidate unknown but pronoun clearly contradicts the LLM speaker's gender
+                wl = word.lower()
+                if wl in (_MALE_PRONOUNS | _FEMALE_PRONOUNS | _NB_PRONOUNS):
+                    pronoun_gender = ('M' if wl in _MALE_PRONOUNS else
+                                      'F' if wl in _FEMALE_PRONOUNS else 'N')
+                    if (current_speaker != 'NARRATOR'
+                            and gender_map.get(current_speaker)
+                            and gender_map[current_speaker] != pronoun_gender):
+                        return 'NARRATOR'  # definitely wrong speaker; blank until identified
+            return None
+
+        # Try pattern A first (attribution follows the quote: "text," she said)
+        found = _try_patterns(_ATTR_AFTER_RE)
+
+        # Fall back to pattern B (attribution precedes the quote: She said, "text")
+        if found is None:
+            found = _try_patterns(_ATTR_BEFORE_RE)
 
         if found and speaker_map.get(para.paragraph_index) != found:
             corrected += 1
@@ -427,14 +478,15 @@ def _call_llm(provider, messages):
 
 
 _SYSTEM_PROMPT = """\
-You are a literary analyst for audiobook production. Your task is to identify who is speaking in each paragraph of a novel.
+You are a literary analyst for audiobook production. Identify the speaker of each paragraph.
 
-Rules:
-- NARRATOR: narration, description, action without dialogue
-- Character name: when a paragraph IS or CONTAINS the character's primary dialogue
-- If a paragraph mixes narration and dialogue, use the speaker of the dialogue
-- Use exact character names (proper nouns, consistent spelling)
-- Return ONLY valid JSON, nothing else"""
+Rules (follow strictly):
+1. NO quotation marks in paragraph → always NARRATOR, no exceptions.
+2. Quotation marks present → identify who speaks the quoted words.
+3. Read the attribution verb: "text," she said → SHE is the speaker, not whoever is addressed.
+4. "text," he said → HE is the speaker. "text," John said → JOHN is the speaker.
+5. A character being MENTIONED or ADDRESSED in a paragraph does NOT make them the speaker.
+6. Use exact character names (consistent spelling). Return ONLY valid JSON."""
 
 
 def _build_user_message(roster, indexed_paragraphs):
@@ -443,10 +495,15 @@ def _build_user_message(roster, indexed_paragraphs):
     lines = [
         f"Known characters: {roster_str}",
         "",
+        'Examples of correct attribution:',
+        '  [0] A man named Colm was waiting at the gate. He recognised her.  → NARRATOR (no quotes)',
+        '  [1] "Maura Connelly," he said, not quite a question.              → Colm (HE said it)',
+        '  [2] "I\'ve been told that," she said, and got in the car.         → whoever SHE is',
+        "",
         "Identify the primary speaker for each numbered paragraph. Return JSON:",
         '{',
         '  "new_characters": ["Name1", "Name2"],',
-        '  "speakers": {"0": "NARRATOR", "1": "Alice", "2": "NARRATOR"}',
+        '  "speakers": {"0": "NARRATOR", "1": "Colm", "2": "Maura"}',
         '}',
         "",
         "Paragraphs:",
@@ -541,11 +598,20 @@ def analyse_book(paragraphs, provider, progress_callback=None):
 
     # --- Post-processing ---
 
-    # 1. Infer character genders from pronoun co-occurrence in the full text
+    # 1. Force NARRATOR on every paragraph with no quotation marks.
+    #    The LLM commonly misattributes narration to a character whose name appears
+    #    in the text — this rule is deterministic and almost always correct.
+    _force_narrator_no_quotes(paragraphs, speaker_map)
+
+    # 2. Infer character genders from pronoun co-occurrence in the full text.
+    #    Speech-attribution pronouns ("he said") are excluded to prevent poisoning
+    #    e.g. '"Maura," he said' must not count as a male signal for Maura.
     gender_map = _infer_genders(paragraphs, character_roster)
 
-    # 2. Override LLM attributions using deterministic text patterns
-    #    e.g. '"I've been told that," she said' → override to female character
+    # 3. Override remaining LLM attributions using deterministic text patterns.
+    #    e.g. '"I've been told that," she said' → override to female character.
+    #    If the pronoun contradicts the current speaker's gender but we can't
+    #    identify who it is, fall back to NARRATOR rather than use the wrong voice.
     _override_speakers_from_attribution(paragraphs, speaker_map, character_roster, gender_map)
 
     # Build output — seed each character dict with inferred gender
