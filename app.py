@@ -406,6 +406,30 @@ def generate_book_with_cast(book_id):
 # Routes — Status (polled by UI)
 # ---------------------------------------------------------------------------
 
+@app.route('/book/<int:book_id>/cancel', methods=['POST'])
+def cancel_book(book_id):
+    """Cancel a queued or in-progress TTS generation."""
+    session = get_session()
+    try:
+        book = _get_book_or_404(book_id, session)
+        if book.tts_status == TTSStatus.queued:
+            # Worker hasn't started yet — cancel immediately in DB
+            book.tts_status = TTSStatus.none
+            book.tts_progress_pct = 0.0
+            book.tts_error = None
+            book.updated_at = datetime.utcnow()
+            session.commit()
+            logger.info("Book %d: cancelled (was queued)", book_id)
+        elif book.tts_status == TTSStatus.processing:
+            # Signal worker to stop after the current paragraph
+            with worker._cancel_lock:
+                worker._cancel_requested.add(book_id)
+            logger.info("Book %d: cancel requested (processing)", book_id)
+    finally:
+        session.close()
+    return jsonify({'ok': True})
+
+
 @app.route('/book/<int:book_id>/status')
 def book_status(book_id):
     session = get_session()

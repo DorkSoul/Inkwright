@@ -62,6 +62,7 @@ window.CAST_DATA = null;
           }
           timer = setTimeout(poll, pollInterval);
         } else {
+          // done, error, none (cancelled) — reload to show correct UI
           window.location.reload();
         }
       })
@@ -590,6 +591,12 @@ function deleteAudio(id) {
   if (!confirm('Delete the generated audio? The book will remain and can be regenerated.')) return;
   fetch('/book/' + id + '/audio', { method: 'DELETE' }).then(function() { window.location.reload(); });
 }
+function cancelGeneration(id) {
+  var btn = document.getElementById('cancel-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Cancelling...'; }
+  fetch('/book/' + id + '/cancel', { method: 'POST' })
+    .then(function() { window.location.reload(); });
+}
 function clearAllPreviews(id) {
   if (!confirm('Delete all preview audio files for this book?')) return;
   fetch('/book/' + id + '/previews', { method: 'DELETE' })
@@ -748,6 +755,7 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
           <div class="progress-bar-fill" id="progress-fill" style="width: {{ book.tts_progress_pct }}%"></div>
         </div>
         <p class="progress-pct" id="progress-pct">{{ book.tts_progress_pct | int }}%</p>
+        <button class="btn btn-danger" id="cancel-btn" onclick="cancelGeneration({{ book.id }})">Cancel</button>
       </div>
 
       {# ── Done ── #}

@@ -25,6 +25,14 @@ COVERS_DIR = '/config/covers'
 _book_progress: dict[int, dict] = {}
 _progress_lock = threading.Lock()
 
+# Cancel flags — set by app.py cancel endpoint, checked in worker loop
+_cancel_requested: set[int] = set()
+_cancel_lock = threading.Lock()
+
+
+class _CancelledError(Exception):
+    pass
+
 
 def _set_progress(book_id: int, **kwargs):
     with _progress_lock:
@@ -180,6 +188,11 @@ def _process_book(book_id: int):
 
         try:
             for i, para in enumerate(paragraphs):
+                with _cancel_lock:
+                    if book_id in _cancel_requested:
+                        _cancel_requested.discard(book_id)
+                        raise _CancelledError()
+
                 voice_override = para_speaker.get(para.paragraph_index) if cast_data else None
                 para_audio, para_words = engine.synthesise_with_words(para.text, voice_override=voice_override)
                 para_duration = len(para_audio) / SAMPLE_RATE
@@ -277,6 +290,25 @@ def _process_book(book_id: int):
             book_id, total_duration / 60, len(index_data['chapters']),
             len(source_para_entries), len(word_entries)
         )
+
+    except _CancelledError:
+        logger.info("Book %d: generation cancelled by user", book_id)
+        if mp3_path and os.path.exists(mp3_path):
+            try:
+                os.remove(mp3_path)
+            except OSError:
+                pass
+        try:
+            session.query(Book).filter(Book.id == book_id).update({
+                'tts_status': TTSStatus.none,
+                'tts_progress_pct': 0.0,
+                'tts_error': None,
+                'updated_at': datetime.utcnow(),
+            })
+            session.commit()
+        except Exception:
+            pass
+        _clear_progress(book_id)
 
     except Exception as e:
         tb = traceback.format_exc()
