@@ -83,13 +83,14 @@ def _process_book(book_id: int):
         book.updated_at = datetime.utcnow()
         session.commit()
 
-        # Check for a completed character cast
-        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
-        cast_data = (
-            json.loads(cast.cast_json)
-            if (cast and cast.status.value == 'done' and cast.cast_json)
-            else None
-        )
+        # Use character cast only when explicitly requested
+        cast_data = None
+        if book.tts_use_cast:
+            cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+            if cast and cast.status.value == 'done' and cast.cast_json:
+                cast_data = json.loads(cast.cast_json)
+            else:
+                logger.warning("Book %d: tts_use_cast=True but no completed cast found — using default voice", book_id)
 
         # Build paragraph_index → voice_id lookup from cast data
         para_speaker: dict[int, str] = {}

@@ -361,6 +361,28 @@ def generate_book(book_id):
         book.tts_speed      = speed
         book.tts_progress_pct = 0.0
         book.tts_error      = None
+        book.tts_use_cast   = False
+        book.updated_at     = datetime.utcnow()
+        session.commit()
+    finally:
+        session.close()
+
+    return redirect(url_for('book_detail', book_id=book_id))
+
+
+@app.route('/book/<int:book_id>/generate-with-cast', methods=['POST'])
+def generate_book_with_cast(book_id):
+    """Queue TTS generation using the per-character voice cast."""
+    session = get_session()
+    try:
+        book = _get_book_or_404(book_id, session)
+        cast = session.query(CharacterCast).filter(CharacterCast.book_id == book_id).first()
+        if cast is None or cast.status != models.CastStatus.done:
+            abort(400)
+        book.tts_status     = TTSStatus.queued
+        book.tts_progress_pct = 0.0
+        book.tts_error      = None
+        book.tts_use_cast   = True
         book.updated_at     = datetime.utcnow()
         session.commit()
     finally:

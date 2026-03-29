@@ -14,6 +14,115 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Character name deduplication
+# ---------------------------------------------------------------------------
+
+# Tokens that are titles/honorifics/connectives — stripped before comparing
+_TITLE_TOKENS = {
+    'mr', 'mrs', 'miss', 'ms', 'dr', 'prof', 'professor', 'sir', 'lord', 'lady',
+    'sergeant', 'sgt', 'captain', 'cap', 'lieutenant', 'lt', 'colonel', 'col',
+    'general', 'gen', 'private', 'pvt', 'corporal', 'cpl', 'major', 'admiral',
+    'reverend', 'rev', 'father', 'mother', 'brother', 'sister', 'saint', 'st',
+    'the', 'of', 'a', 'an', 'and', 'or', 'von', 'van', 'de', 'del', 'der',
+    'le', 'la', 'du', 'al',
+}
+
+
+def _name_core_tokens(name: str) -> frozenset:
+    """Extract significant tokens from a character name, stripping titles and punctuation."""
+    tokens = re.split(r'[\s\-_]+', name.lower())
+    tokens = [re.sub(r'[^a-z]', '', t) for t in tokens]
+    return frozenset(t for t in tokens if t and t not in _TITLE_TOKENS and len(t) > 1)
+
+
+def _deduplicate_characters(characters: dict, segments: list) -> tuple[dict, list]:
+    """
+    Merge character name variants that share core name tokens.
+
+    E.g. "John", "Sergeant John Smith", "Mr. Smith" → single canonical name.
+    The canonical name is chosen as whichever variant appears most in segments.
+
+    Returns updated (characters, segments) with canonical names.
+    """
+    names = [n for n in characters if n != 'NARRATOR']
+    if not names:
+        return characters, segments
+
+    # Core tokens for each name
+    core: dict[str, frozenset] = {n: _name_core_tokens(n) for n in names}
+
+    # Union-Find
+    parent = {n: n for n in names}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # Merge names that share at least one core token
+    for i, n1 in enumerate(names):
+        for n2 in names[i + 1:]:
+            if core[n1] and core[n2] and (core[n1] & core[n2]):
+                union(n1, n2)
+
+    # Count how many segments each original name appears in
+    seg_counts: dict[str, int] = {}
+    for seg in segments:
+        spk = seg.get('speaker', 'NARRATOR')
+        seg_counts[spk] = seg_counts.get(spk, 0) + 1
+
+    # Build groups and pick canonical (most-frequent; tie-break: shortest name)
+    groups: dict[str, list] = {}
+    for n in names:
+        groups.setdefault(find(n), []).append(n)
+
+    alias_to_canonical: dict[str, str] = {'NARRATOR': 'NARRATOR'}
+    for group in groups.values():
+        canonical = max(group, key=lambda n: (seg_counts.get(n, 0), -len(n)))
+        for n in group:
+            alias_to_canonical[n] = canonical
+
+    # Rebuild characters dict merging data under canonical name
+    new_characters: dict = {'NARRATOR': characters.get('NARRATOR', {})}
+    for group in groups.values():
+        canonical = alias_to_canonical[group[0]]
+        merged: dict = {}
+        for n in group:
+            merged.update(characters.get(n, {}))
+        new_characters[canonical] = merged
+
+    # Remap segments
+    new_segments = [
+        {**seg, 'speaker': alias_to_canonical.get(seg.get('speaker', 'NARRATOR'), seg.get('speaker', 'NARRATOR'))}
+        for seg in segments
+    ]
+
+    merged_count = sum(1 for g in groups.values() if len(g) > 1)
+    if merged_count:
+        logger.info("Deduplicated %d character groups from %d raw names into %d canonical names",
+                    merged_count, len(names), len(new_characters) - 1)
+
+    return new_characters, new_segments
+
+
+def _add_appearance_counts(characters: dict, segments: list) -> dict:
+    """Add a 'count' field to each character dict with the number of segments they speak."""
+    counts: dict[str, int] = {}
+    for seg in segments:
+        spk = seg.get('speaker', 'NARRATOR')
+        counts[spk] = counts.get(spk, 0) + 1
+    return {
+        name: {**data, 'count': counts.get(name, 0)}
+        for name, data in characters.items()
+    }
+
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://ollama:11434')
 
 OLLAMA_MODELS = {
@@ -244,9 +353,8 @@ def analyse_book(paragraphs, provider, progress_callback=None):
     # Ensure NARRATOR is always present
     character_roster.add('NARRATOR')
 
-    # Build output
+    # Build raw output
     characters = {name: {} for name in sorted(character_roster)}
-    # Guarantee NARRATOR is in characters
     characters.setdefault('NARRATOR', {})
 
     segments = []
@@ -256,6 +364,12 @@ def analyse_book(paragraphs, provider, progress_callback=None):
             'paragraph_index': para.paragraph_index,
             'speaker': speaker,
         })
+
+    # Deduplicate name variants (e.g. "John" / "Sgt. John" / "Mr. Smith" → one entry)
+    characters, segments = _deduplicate_characters(characters, segments)
+
+    # Add appearance counts to each character
+    characters = _add_appearance_counts(characters, segments)
 
     return {
         'characters': characters,

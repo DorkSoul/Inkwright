@@ -149,15 +149,23 @@ class TTSEngine:
         # Derive lang_code from voice if not explicitly provided
         self.lang_code = lang_code or lang_code_for_voice(self.voice)
         self._pipeline = None
+        self._voice_cache: dict = {}  # voice_id → loaded tensor (avoids repeated load_voice calls)
 
     def load(self):
         if self._pipeline is not None:
             return
         from kokoro import KPipeline
         self._pipeline = KPipeline(lang_code=self.lang_code, repo_id=REPO_ID)
+        self._voice_cache = {}
         logger.info("Kokoro pipeline loaded (lang=%s voice=%s speed=%.2f blend=%s@%.0f%%)",
                     self.lang_code, self.voice, self.speed,
                     self.voice_blend or 'none', self.blend_ratio * 100)
+
+    def _load_voice_cached(self, voice_id: str):
+        """Load a voice tensor, caching the result to avoid repeated disk/model calls."""
+        if voice_id not in self._voice_cache:
+            self._voice_cache[voice_id] = self._pipeline.load_voice(voice_id)
+        return self._voice_cache[voice_id]
 
     def _voice_tensor(self, voice_override: str = None):
         """Return the voice style tensor.
@@ -165,12 +173,11 @@ class TTSEngine:
         If voice_override is provided and valid, use it directly without blending.
         Otherwise use self.voice with optional blending.
         """
-        import torch
         voice_id = voice_override if (voice_override and voice_override in VOICE_LABELS) else self.voice
-        pack_a = self._pipeline.load_voice(voice_id)
+        pack_a = self._load_voice_cached(voice_id)
         # Only blend if NOT using an override voice
         if not voice_override and self.voice_blend and 0.0 < self.blend_ratio <= 1.0:
-            pack_b = self._pipeline.load_voice(self.voice_blend)
+            pack_b = self._load_voice_cached(self.voice_blend)
             r = self.blend_ratio
             return (1.0 - r) * pack_a + r * pack_b
         return pack_a

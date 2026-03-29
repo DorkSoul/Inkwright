@@ -3,7 +3,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    create_engine, Column, Integer, String, Float, DateTime, Text,
+    create_engine, Column, Integer, String, Float, DateTime, Text, Boolean,
     Enum as SAEnum, ForeignKey, text
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -35,6 +35,7 @@ class Book(Base):
     tts_speed = Column(Float, nullable=False, default=1.0)
     tts_progress_pct = Column(Float, nullable=False, default=0.0)
     tts_error = Column(String, nullable=True)
+    tts_use_cast = Column(Boolean, nullable=False, default=False)
     series = Column(String, nullable=True)
     series_index = Column(Float, nullable=True)
     publisher = Column(String, nullable=True)
@@ -131,6 +132,7 @@ def _migrate(eng):
         "ALTER TABLE books ADD COLUMN publisher VARCHAR",
         "ALTER TABLE books ADD COLUMN published_date VARCHAR",
         "CREATE TABLE IF NOT EXISTS character_casts (id INTEGER PRIMARY KEY AUTOINCREMENT, book_id INTEGER NOT NULL UNIQUE REFERENCES books(id), status VARCHAR NOT NULL DEFAULT 'none', llm_provider VARCHAR, progress_pct FLOAT NOT NULL DEFAULT 0.0, error_msg VARCHAR, cast_json TEXT, created_at DATETIME, updated_at DATETIME)",
+        "ALTER TABLE books ADD COLUMN tts_use_cast INTEGER NOT NULL DEFAULT 0",
     ]
     with eng.connect() as conn:
         for stmt in migrations:

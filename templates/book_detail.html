@@ -469,9 +469,13 @@ document.addEventListener('DOMContentLoaded', function() {
     var list = document.getElementById('cast-character-list');
     list.innerHTML = '';
     var characters = cast.characters || {};
+    // Sort: NARRATOR first, then by appearance count descending, then alpha
     var names = Object.keys(characters).sort(function(a, b) {
       if (a === 'NARRATOR') return -1;
       if (b === 'NARRATOR') return 1;
+      var ca = (characters[a] && characters[a].count) || 0;
+      var cb = (characters[b] && characters[b].count) || 0;
+      if (cb !== ca) return cb - ca;
       return a.localeCompare(b);
     });
     names.forEach(function(name) {
@@ -479,7 +483,8 @@ document.addEventListener('DOMContentLoaded', function() {
       row.className = 'cast-char-row';
       var label = document.createElement('span');
       label.className = 'cast-char-name';
-      label.textContent = name;
+      var count = (characters[name] && characters[name].count) || 0;
+      label.textContent = name + (count ? ' (' + count + ')' : '');
       var sel = document.createElement('select');
       sel.className = 'cast-voice-sel voice-select';
       sel.dataset.character = name;
@@ -505,6 +510,7 @@ document.addEventListener('DOMContentLoaded', function() {
     list.style.display = 'block';
     document.getElementById('cast-save-btn').style.display = 'inline-block';
     document.getElementById('cast-reset-btn').style.display = 'inline-block';
+    document.getElementById('cast-generate-btn').style.display = 'inline-block';
   }
 
   document.getElementById('cast-save-btn').addEventListener('click', function() {
@@ -533,6 +539,7 @@ document.addEventListener('DOMContentLoaded', function() {
         document.getElementById('cast-character-list').style.display = 'none';
         document.getElementById('cast-save-btn').style.display = 'none';
         document.getElementById('cast-reset-btn').style.display = 'none';
+        document.getElementById('cast-generate-btn').style.display = 'none';
         document.getElementById('cast-analyse-btn').disabled = false;
         document.getElementById('cast-status').textContent = 'Analysis cleared.';
         castData = null;
@@ -543,6 +550,7 @@ document.addEventListener('DOMContentLoaded', function() {
   if (window.CAST_DATA) {
     castData = window.CAST_DATA;
     renderCastCharacters(window.CAST_DATA);
+    document.getElementById('cast-generate-btn').style.display = 'inline-block';
   } else {
     pollCastStatus();
   }
@@ -843,6 +851,14 @@ function pollPreview(bookId, btnId, statusEl, playerEl, audio) {
           <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
             <button type="button" class="btn btn-secondary" id="cast-save-btn">Save Voice Assignments</button>
             <button type="button" class="btn btn-danger" id="cast-reset-btn">Reset / Re-analyse</button>
+          </div>
+
+          <div style="margin-top:1rem; border-top:1px solid var(--border); padding-top:1rem;">
+            <form method="post" action="/book/{{ book.id }}/generate-with-cast" id="cast-generate-form">
+              <button type="submit" class="btn btn-primary" id="cast-generate-btn" style="display:none">
+                Generate Audiobook with Character Voices
+              </button>
+            </form>
           </div>
 
         </div>
