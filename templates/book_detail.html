@@ -504,10 +504,24 @@ document.addEventListener('DOMContentLoaded', function() {
     names.forEach(function(name) {
       var row = document.createElement('div');
       row.className = 'cast-char-row';
+
+      // Name + count
       var label = document.createElement('span');
       label.className = 'cast-char-name';
       var count = (characters[name] && characters[name].count) || 0;
       label.textContent = name + (count ? ' (' + count + ')' : '');
+
+      // Gender selector
+      var genderSel = document.createElement('select');
+      genderSel.className = 'cast-gender-sel';
+      genderSel.dataset.character = name;
+      var currentGender = (characters[name] && characters[name].gender) || '';
+      [['', '?'], ['M', '♂'], ['F', '♀'], ['N', '⚧']].forEach(function(opt) {
+        var o = document.createElement('option');
+        o.value = opt[0]; o.textContent = opt[1];
+        if (opt[0] === currentGender) o.selected = true;
+        genderSel.appendChild(o);
+      });
       var sel = document.createElement('select');
       sel.className = 'cast-voice-sel voice-select';
       sel.dataset.character = name;
@@ -527,6 +541,7 @@ document.addEventListener('DOMContentLoaded', function() {
         sel.appendChild(grp);
       });
       row.appendChild(label);
+      if (name !== 'NARRATOR') row.appendChild(genderSel);
       row.appendChild(sel);
       list.appendChild(row);
     });
@@ -543,6 +558,11 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!castData.characters[name]) castData.characters[name] = {};
       castData.characters[name].voice = sel.value;
       updates[name] = {voice: sel.value};
+    });
+    document.querySelectorAll('.cast-gender-sel').forEach(function(sel) {
+      var name = sel.dataset.character;
+      if (!updates[name]) updates[name] = {};
+      updates[name].gender = sel.value || null;
     });
     fetch('/book/' + castBookId + '/characters', {
       method: 'POST',

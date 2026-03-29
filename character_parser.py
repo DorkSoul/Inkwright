@@ -123,6 +123,192 @@ def _add_appearance_counts(characters: dict, segments: list) -> dict:
         for name, data in characters.items()
     }
 
+
+# ---------------------------------------------------------------------------
+# Gender inference from pronoun co-occurrence
+# ---------------------------------------------------------------------------
+
+_MALE_PRONOUNS   = frozenset({'he', 'him', 'his'})
+_FEMALE_PRONOUNS = frozenset({'she', 'her', 'hers'})
+_NB_PRONOUNS     = frozenset({'they', 'them', 'their', 'theirs'})
+
+_PRONOUN_SCAN_RE = re.compile(
+    r'\b(he|him|his|she|her|hers|they|them|their|theirs)\b', re.IGNORECASE
+)
+
+
+def _infer_genders(paragraphs: list, character_roster: set) -> dict[str, str]:
+    """
+    Infer gender (M/F/N) for each character by counting pronoun co-occurrences
+    within a 200-character window around each mention of the character's first name.
+
+    Returns {character_name: 'M'|'F'|'N'} for characters with a clear signal.
+    Requires at least 3 pronoun matches and 60% agreement before committing.
+    """
+    names = [n for n in character_roster if n != 'NARRATOR']
+
+    # first-name token → list of full character names
+    first_to_chars: dict[str, list[str]] = {}
+    for name in names:
+        tok = name.split()[0].lower()
+        first_to_chars.setdefault(tok, []).append(name)
+
+    # Compile per-first-name patterns (avoid re-compiling in inner loop)
+    patterns = {
+        tok: re.compile(r'\b' + re.escape(tok) + r'\b', re.IGNORECASE)
+        for tok in first_to_chars
+    }
+
+    scores: dict[str, dict[str, int]] = {n: {'M': 0, 'F': 0, 'N': 0} for n in names}
+
+    for para in paragraphs:
+        text = para.text
+        for tok, pat in patterns.items():
+            for m in pat.finditer(text):
+                window = text[max(0, m.start() - 200): m.end() + 200]
+                for pm in _PRONOUN_SCAN_RE.finditer(window):
+                    p = pm.group(1).lower()
+                    gender = ('M' if p in _MALE_PRONOUNS else
+                              'F' if p in _FEMALE_PRONOUNS else
+                              'N' if p in _NB_PRONOUNS else None)
+                    if gender:
+                        for full_name in first_to_chars[tok]:
+                            scores[full_name][gender] += 1
+
+    result: dict[str, str] = {}
+    for name, sc in scores.items():
+        total = sc['M'] + sc['F'] + sc['N']
+        if total < 3:
+            continue
+        best = max(sc, key=sc.get)
+        if sc[best] / total >= 0.6:
+            result[name] = best
+
+    if result:
+        logger.info("Inferred gender for %d character(s): %s",
+                    len(result),
+                    {n: g for n, g in result.items()})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Deterministic attribution override
+# ---------------------------------------------------------------------------
+
+_SAID_VERBS_PAT = (
+    r'(?:said|asked|replied|answered|shouted|whispered|called|cried|muttered|'
+    r'murmured|laughed|sighed|added|continued|began|told|declared|exclaimed|'
+    r'snapped|hissed|growled|grumbled|screamed|breathed|insisted|admitted|'
+    r'protested|agreed|confirmed|resumed|interrupted|responded|demanded|'
+    r'announced|suggested|offered|wondered|thought|remarked|noted|observed)'
+)
+
+# Pattern A: closing-quote  [,!?.]?  Name/pronoun  said-verb
+# e.g. "I've been told that," she said   OR   "Hello!" John exclaimed
+_ATTR_AFTER_RE = re.compile(
+    r'["\u201d][,!?.]?\s{0,5}([A-Za-z]+)\s+' + _SAID_VERBS_PAT,
+    re.IGNORECASE,
+)
+
+# Pattern B: Name/pronoun  said-verb  [,:]?  opening-quote
+# e.g. She said, "dialogue"   OR   John replied: "dialogue"
+_ATTR_BEFORE_RE = re.compile(
+    r'(?:^|[.!?]\s+)([A-Za-z]+)\s+' + _SAID_VERBS_PAT + r'[,: ]*["\u201c]',
+    re.IGNORECASE,
+)
+
+
+def _resolve_word_to_character(
+    word: str,
+    character_roster: set,
+    gender_map: dict[str, str],
+    first_to_chars: dict[str, list[str]],
+) -> str | None:
+    """
+    Given a word from an attribution pattern (a name or pronoun),
+    return the matching character name or None if ambiguous/unknown.
+    """
+    wl = word.lower()
+
+    # Pronoun resolution
+    if wl in _MALE_PRONOUNS | _FEMALE_PRONOUNS | _NB_PRONOUNS:
+        target = ('M' if wl in _MALE_PRONOUNS else
+                  'F' if wl in _FEMALE_PRONOUNS else 'N')
+        candidates = [n for n in character_roster if gender_map.get(n) == target]
+        return candidates[0] if len(candidates) == 1 else None
+
+    # Direct first-name match
+    matches = first_to_chars.get(wl, [])
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return None  # ambiguous
+
+    # Partial: word is a prefix of a character name token
+    for name in character_roster:
+        if name == 'NARRATOR':
+            continue
+        for tok in name.lower().split():
+            if tok == wl:
+                return name
+
+    return None
+
+
+def _override_speakers_from_attribution(
+    paragraphs: list,
+    speaker_map: dict[int, str],
+    character_roster: set,
+    gender_map: dict[str, str],
+) -> None:
+    """
+    Scan each paragraph for explicit attribution patterns ("...", she said)
+    and correct speaker_map in-place where a clear signal is found.
+
+    This runs after LLM attribution and fixes the most common errors caused
+    by the model misreading mixed dialogue/narration paragraphs.
+    """
+    # Build first-name → full name(s) lookup
+    first_to_chars: dict[str, list[str]] = {}
+    for name in character_roster:
+        if name == 'NARRATOR':
+            continue
+        tok = name.split()[0].lower()
+        first_to_chars.setdefault(tok, []).append(name)
+
+    corrected = 0
+
+    for para in paragraphs:
+        text = para.text
+        found: str | None = None
+
+        # Try pattern A first (most reliable — attribution follows the quote)
+        for m in _ATTR_AFTER_RE.finditer(text):
+            candidate = _resolve_word_to_character(
+                m.group(1), character_roster, gender_map, first_to_chars
+            )
+            if candidate and candidate != 'NARRATOR':
+                found = candidate
+                break
+
+        # Fall back to pattern B (attribution precedes the quote)
+        if found is None:
+            for m in _ATTR_BEFORE_RE.finditer(text):
+                candidate = _resolve_word_to_character(
+                    m.group(1), character_roster, gender_map, first_to_chars
+                )
+                if candidate and candidate != 'NARRATOR':
+                    found = candidate
+                    break
+
+        if found and speaker_map.get(para.paragraph_index) != found:
+            corrected += 1
+            speaker_map[para.paragraph_index] = found
+
+    if corrected:
+        logger.info("Attribution override: corrected %d paragraph(s) using text patterns",
+                    corrected)
+
 OLLAMA_HOST = os.environ.get('OLLAMA_HOST', 'http://ollama:11434')
 
 OLLAMA_MODELS = {
@@ -353,8 +539,20 @@ def analyse_book(paragraphs, provider, progress_callback=None):
     # Ensure NARRATOR is always present
     character_roster.add('NARRATOR')
 
-    # Build raw output
-    characters = {name: {} for name in sorted(character_roster)}
+    # --- Post-processing ---
+
+    # 1. Infer character genders from pronoun co-occurrence in the full text
+    gender_map = _infer_genders(paragraphs, character_roster)
+
+    # 2. Override LLM attributions using deterministic text patterns
+    #    e.g. '"I've been told that," she said' → override to female character
+    _override_speakers_from_attribution(paragraphs, speaker_map, character_roster, gender_map)
+
+    # Build output — seed each character dict with inferred gender
+    characters = {
+        name: ({'gender': gender_map[name]} if name in gender_map else {})
+        for name in sorted(character_roster)
+    }
     characters.setdefault('NARRATOR', {})
 
     segments = []
@@ -365,10 +563,10 @@ def analyse_book(paragraphs, provider, progress_callback=None):
             'speaker': speaker,
         })
 
-    # Deduplicate name variants (e.g. "John" / "Sgt. John" / "Mr. Smith" → one entry)
+    # 3. Deduplicate name variants (e.g. "John" / "Sgt. John" / "Mr. Smith" → one entry)
     characters, segments = _deduplicate_characters(characters, segments)
 
-    # Add appearance counts to each character
+    # 4. Add appearance counts
     characters = _add_appearance_counts(characters, segments)
 
     return {

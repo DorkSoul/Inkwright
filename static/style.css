@@ -1403,9 +1403,20 @@ details[open] .regen-summary::before { content: '− '; }
 }
 .cast-char-row:last-child { border-bottom: none; }
 .cast-char-name {
-  min-width: 140px;
+  flex: 1;
   font-weight: 600;
   font-size: 0.9rem;
+}
+.cast-gender-sel {
+  width: 3rem;
+  font-size: 1rem;
+  padding: 0.15rem 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 #cast-character-list {
   display: none;
